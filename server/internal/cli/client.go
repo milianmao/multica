@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,6 +25,52 @@ var ClientVersion = "dev"
 // ClientPlatform identifies this client to the server. Override for tests
 // or alternative entry points; defaults to "cli".
 var ClientPlatform = "cli"
+
+// ClientCallerEnv carries the agent provider that owns the current run. Only
+// the daemon sets it (in a task's environment), so a terminal user has no value
+// and sends no caller header; the variable's presence is the whole switch.
+const ClientCallerEnv = "MULTICA_CLI_CALLER"
+
+// ClientCaller is the optional <provider>[/<version>] identity sent as
+// X-Client-Caller on every request. Set from ClientCallerEnv by the multica
+// binary; empty means no header.
+//
+// The value is self-reported and travels in the task environment, so anything
+// in the task can forge it. It is observability only: never an authorization,
+// quota, billing, or attribution input — that stays the mat_ task token.
+var ClientCaller string
+
+// clientCallerPattern bounds what may be sent: a lowercase provider, optionally
+// followed by one version segment. It excludes whitespace, controls, and
+// non-ASCII because Header.Set would otherwise put them on the wire (Go rejects
+// CR/LF only at write time, turning the whole command into a transport error).
+var clientCallerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,31}(/[A-Za-z0-9][A-Za-z0-9._+-]{0,15})?$`)
+
+// normalizeClientCaller returns value when it is a well-formed caller identity,
+// and "" otherwise. Callers drop the header instead of failing: a malformed
+// value must never make an otherwise-valid command fail.
+func normalizeClientCaller(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 || !clientCallerPattern.MatchString(value) {
+		return ""
+	}
+	return value
+}
+
+// CallerValue formats the X-Client-Caller value for a run, or "" when the
+// provider cannot be expressed. An unusable version drops to the provider alone
+// instead of discarding the identity: version probes may return a banner line
+// rather than a version (see extractVersionLine), and losing attribution over
+// that is worse than losing the version.
+func CallerValue(provider, version string) string {
+	provider = strings.TrimSpace(provider)
+	if version = strings.TrimSpace(version); version != "" {
+		if combined := normalizeClientCaller(provider + "/" + version); combined != "" {
+			return combined
+		}
+	}
+	return normalizeClientCaller(provider)
+}
 
 // ClientOS is the normalized operating system string sent as X-Client-OS.
 // Computed once from runtime.GOOS so the server doesn't need to reverse-map
@@ -255,6 +302,12 @@ func (c *APIClient) setHeaders(req *http.Request) {
 	}
 	if osName != "" {
 		req.Header.Set("X-Client-OS", osName)
+	}
+	// Only a daemon-managed run has a caller identity. The header is attached
+	// here rather than on APIClient so every existing constructor inherits it
+	// without touching the call sites.
+	if caller := normalizeClientCaller(ClientCaller); caller != "" {
+		req.Header.Set("X-Client-Caller", caller)
 	}
 }
 

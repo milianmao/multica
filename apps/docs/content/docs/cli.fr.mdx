@@ -464,6 +464,14 @@ Si l'essentiel de votre travail se passe déjà dans Codex, Claude Code ou Curso
 
 Il passe entièrement par votre CLI authentifié et n'accorde aucun accès qui lui soit propre : les permissions proviennent toujours de votre connexion, du profil sélectionné et de l'espace de travail. Il nécessite le CLI v0.4.26 ou ultérieur. Le README du dépôt explique l'installation via la marketplace de plugins de Claude Code, l'installateur de skills de Codex, Cursor et tout autre outil qui charge des instructions Markdown.
 
+### Attribution des requêtes depuis une exécution
+
+Chaque requête du CLI porte `X-Client-Platform`, `X-Client-Version` et `X-Client-OS`. Dans une exécution gérée par le daemon, elle porte aussi `X-Client-Caller`, la valeur du provider qui pilote cette exécution (`<provider>`, ou `<provider>/<version>` lorsque la version du binaire lancé est connue), ce qui permet aux journaux du serveur de distinguer un appel du CLI fait par un agent dans son exécution d'une commande tapée dans un terminal. La valeur vient de `MULTICA_CLI_CALLER`, que seul le daemon définit ; un terminal n'a pas cette variable et n'envoie donc aucun en-tête de caller.
+
+Le CLI laisse volontairement `User-Agent` à sa valeur par défaut de Go et ne réécrit jamais l'UA d'un autre programme. `X-Client-Version` est la source de vérité de la version du CLI ; une seconde copie dans `User-Agent` ne ferait qu'inviter les composants en aval à l'analyser.
+
+`X-Client-Caller` est déclaratif : tout ce qui tourne dans l'exécution peut le falsifier ou définir la variable lui-même. Traitez-le uniquement comme une étiquette d'observabilité, jamais comme une entrée d'autorisation, de quota, de facturation ou d'attribution. L'identité vient toujours du jeton de tâche `mat_`. Une valeur mal formée (caractères de contrôle, non-ASCII, plus de 64 octets) est écartée plutôt que de faire échouer la commande.
+
 ## Étapes suivantes
 
 - [Skill Multica CLI](https://github.com/multica-ai/multica-cli) — piloter Multica depuis Codex, Claude Code ou Cursor.

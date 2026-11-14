@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/pkg/agent"
@@ -6977,5 +6978,51 @@ func TestHermesProfileChainCoversLaunchPrefix(t *testing.T) {
 	}
 	if strings.Join(strippedCustom, "\x00") != "--yolo" {
 		t.Errorf("custom = %v, want only the selector's value removed", strippedCustom)
+	}
+}
+
+// The caller label is the only signal that tells a server an API request came
+// from an agent's own CLI call inside a run rather than a human's terminal.
+func TestInjectClientCaller(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name              string
+		provider, version string
+		wantPresent       bool
+		wantValue         string
+	}{
+		{name: "provider and version", provider: "codex", version: "0.104.0", wantPresent: true, wantValue: "codex/0.104.0"},
+		{name: "provider only", provider: "claude", wantPresent: true, wantValue: "claude"},
+		// An unrecognizable version keeps the provider rather than dropping the
+		// whole identity: version probes can return a banner, not a version.
+		{name: "unusable version", provider: "codex", version: "initializing plugins", wantPresent: true, wantValue: "codex"},
+		// No provider means nothing can be attributed, so no variable is set at
+		// all. An empty value would be indistinguishable from "no run context".
+		{name: "no provider", provider: "", version: "1.0"},
+		{name: "unusable provider", provider: "Claude Code", version: "1.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"MULTICA_TOKEN": "mat_fixture"}
+			injectClientCaller(env, tc.provider, tc.version)
+			got, present := env[cli.ClientCallerEnv]
+			if present != tc.wantPresent {
+				t.Fatalf("%s present = %v, want %v", cli.ClientCallerEnv, present, tc.wantPresent)
+			}
+			if tc.wantPresent && got != tc.wantValue {
+				t.Fatalf("%s = %q, want %q", cli.ClientCallerEnv, got, tc.wantValue)
+			}
+			if present && got == "" {
+				t.Fatal("an empty caller value must be absent, not present-and-empty")
+			}
+		})
+	}
+}
+
+// A run that sets MULTICA_CLI_CALLER must not lose it in a Hermes tool
+// subprocess, which rebuilds its environment from an explicit allowlist.
+func TestHermesPassthroughIncludesClientCaller(t *testing.T) {
+	t.Parallel()
+	if !slices.Contains(execenv.HermesTaskEnvPassthroughNames(), cli.ClientCallerEnv) {
+		t.Fatalf("%s is injected into runs but Hermes tool subprocesses will drop it", cli.ClientCallerEnv)
 	}
 }

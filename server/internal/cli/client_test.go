@@ -670,3 +670,98 @@ func TestHTTPErrorKeepsLargeStructuredBody(t *testing.T) {
 		t.Fatalf("code = %q, required = %d; want the full plan", got.Code, len(got.Plan.Required))
 	}
 }
+
+// The daemon is the only writer of MULTICA_CLI_CALLER, so the header is how a
+// server can tell an agent's own CLI call from a human's terminal command. It
+// must stay a best-effort label: an unusable value is dropped, never raised as
+// an error, because a bad env value must not fail an otherwise valid command.
+func TestSetHeaders_ClientCaller(t *testing.T) {
+	send := func(t *testing.T, caller string) (got, ua string) {
+		t.Helper()
+		orig := ClientCaller
+		ClientCaller = caller
+		t.Cleanup(func() { ClientCaller = orig })
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Header.Get("X-Client-Caller")
+			ua = r.Header.Get("User-Agent")
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer srv.Close()
+
+		client := NewAPIClient(srv.URL, "", "test-token")
+		if err := client.PostJSON(context.Background(), "/test", map[string]any{}, nil); err != nil {
+			t.Fatalf("PostJSON: %v", err)
+		}
+		return got, ua
+	}
+
+	t.Run("well-formed value is sent and the UA is left alone", func(t *testing.T) {
+		got, ua := send(t, "codex/0.104.0")
+		if got != "codex/0.104.0" {
+			t.Errorf("X-Client-Caller = %q, want codex/0.104.0", got)
+		}
+		// The CLI deliberately never sets User-Agent: X-Client-Version is the
+		// version source of truth, and a second one would invite downstream
+		// parsing of a header this client does not own.
+		if want := "Go-http-client/1.1"; ua != want {
+			t.Errorf("User-Agent = %q, want the Go default %q", ua, want)
+		}
+	})
+
+	t.Run("provider without a version is sent", func(t *testing.T) {
+		if got, _ := send(t, "claude"); got != "claude" {
+			t.Errorf("X-Client-Caller = %q, want claude", got)
+		}
+	})
+
+	// Header injection, non-ASCII, and unbounded values must all resolve to "no
+	// header". Go's transport rejects CR/LF at write time, which would turn
+	// every command into a transport error, so the value is validated first.
+	for _, tc := range []struct{ name, value string }{
+		{"empty", ""},
+		{"whitespace", "   "},
+		{"crlf", "codex\r\nX-Injected: 1"},
+		{"bare newline", "codex\n1.0"},
+		{"control character", "codex\x001.0"},
+		{"escape", "codex\x1b[31m"},
+		{"del", "codex\x7f"},
+		{"non-ASCII", "コードex/1.0"},
+		{"space", "claude code/1.0"},
+		{"tab", "codex\t/1.0"},
+		{"too long", "codex/" + strings.Repeat("1", 60)},
+		{"leading slash", "/1.2"},
+		{"empty version", "codex/"},
+		{"two slashes", "a/b/c"},
+		{"path traversal", "../../etc/passwd"},
+		{"uppercase provider", "Codex/1.0"},
+		{"shell metacharacter", "codex;rm -rf /"},
+	} {
+		t.Run("dropped: "+tc.name, func(t *testing.T) {
+			if got, _ := send(t, tc.value); got != "" {
+				t.Errorf("X-Client-Caller = %q, want no header", got)
+			}
+		})
+	}
+}
+
+func TestCallerValue(t *testing.T) {
+	for _, tc := range []struct{ provider, version, want string }{
+		{"codex", "0.104.0", "codex/0.104.0"},
+		{"claude", "", "claude"},
+		{"claude", "   ", "claude"},
+		// A version probe may return a banner line rather than a version
+		// (extractVersionLine falls back to the raw trimmed output). Losing the
+		// version is acceptable; losing the whole provider is not.
+		{"codex", "initializing plugins", "codex"},
+		{"codex", "1.0\n2.0", "codex"},
+		{"", "1.0", ""},
+		{"Codex", "1.0", ""},
+		{"codex", "1.2.3-beta+build", "codex/1.2.3-beta+build"},
+		{"opencode", strings.Repeat("1", 40), "opencode"},
+	} {
+		if got := CallerValue(tc.provider, tc.version); got != tc.want {
+			t.Errorf("CallerValue(%q, %q) = %q, want %q", tc.provider, tc.version, got, tc.want)
+		}
+	}
+}
