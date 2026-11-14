@@ -1682,6 +1682,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/runtimes/{runtimeId}/environment-commands/{commandId}/result", h.ReportEnvironmentCommandResult)
 
 		r.Get("/tasks/{taskId}/status", h.GetTaskStatus)
+		r.Post("/tasks/{taskId}/approvals", h.DaemonRegisterTaskApproval)
+		r.Get("/tasks/{taskId}/approvals", h.DaemonListTaskApprovals)
+		r.Post("/tasks/{taskId}/approvals/{approvalId}/ack", h.DaemonAckTaskApproval)
+		r.Post("/tasks/{taskId}/approvals/expire", h.DaemonExpireTaskApprovals)
 		r.Post("/tasks/{taskId}/start", h.StartTask)
 		r.Post("/tasks/{taskId}/supplements/claim", h.ClaimTaskSupplement)
 		r.Post("/tasks/{taskId}/supplements/{commentId}/ack", h.AckTaskSupplement)
@@ -2213,6 +2217,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Task messages (user-facing, not daemon auth)
 			r.Get("/api/tasks/{taskId}/messages", h.ListTaskMessagesByUser)
+			r.Get("/api/tasks/{taskId}/approvals", h.ListTaskApprovalsByUser)
+			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/approvals/{approvalId}/decision", h.DecideTaskApprovalByUser)
 			r.Get("/api/tasks/{taskId}/context-receipt", h.GetTaskContextReceipt)
 			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/retry-source-context", h.RetrySourceContextQuickCreate)
 

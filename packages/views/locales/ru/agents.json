@@ -928,6 +928,15 @@
     "failed_indicator": "Ошибка"
   },
   "transcript": {
+    "conversation": "Диалог",
+    "execution_log": "Журнал выполнения",
+    "final_reply": "Итоговый ответ",
+    "guidance_label": "Добавить указания для этого запуска",
+    "guidance_send": "Отправить указания",
+    "guidance_failed": "Не удалось отправить указания. Ваш текст сохранён.",
+    "guidance_shared": "Видно в ветке комментариев задачи.",
+    "guidance_unavailable": "Этот запуск не может принять дополнительные указания.",
+    "guidance_ended": "Этот запуск завершён.",
     "dialog_title": "Протокол выполнения агента",
     "status_running": "Выполняется",
     "status_completed": "Завершено",

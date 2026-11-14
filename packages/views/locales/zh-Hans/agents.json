@@ -868,6 +868,15 @@
     "failed_indicator": "失败"
   },
   "transcript": {
+    "conversation": "对话",
+    "execution_log": "执行日志",
+    "final_reply": "最终回复",
+    "guidance_label": "为本次运行追加说明",
+    "guidance_send": "追加说明",
+    "guidance_failed": "无法追加说明，输入已保留。",
+    "guidance_shared": "可见范围与任务评论线程相同。",
+    "guidance_unavailable": "本次运行无法接收追加说明。",
+    "guidance_ended": "本次运行已结束。",
     "dialog_title": "智能体执行记录",
     "status_running": "进行中",
     "status_completed": "已完成",

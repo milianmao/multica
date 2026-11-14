@@ -25,6 +25,25 @@
     "more_one": "{{count}} more chat",
     "more_other": "{{count}} more chats"
   },
+  "execution_config": {
+    "label": "Execution settings",
+    "inherit": "Use agent settings",
+    "model": "Model",
+    "thinking": "Reasoning effort",
+    "approval": "Permissions",
+    "approval_inherit": "Keep existing behavior",
+    "approval_on_request": "Ask when needed",
+    "approval_full_access": "Full access",
+    "unsupported": "This server does not support chat execution overrides.",
+    "model_unsupported": "This runtime does not support model overrides.",
+    "thinking_unsupported": "This runtime does not support reasoning overrides.",
+    "thinking_unavailable": "The current model offers no selectable reasoning effort.",
+    "catalog_unavailable": "The runtime model catalog is unavailable.",
+    "refresh_catalog": "Refresh models",
+    "approval_unsupported": "Native approvals are currently available for Codex only.",
+    "full_access_hint": "Full access removes the sandbox boundary. Commands and files can be changed without asking.",
+    "save_failed": "Could not save these settings. The previous selection was kept."
+  },
   "input": {
     "page_context_add": "Add this page as context",
     "page_context_remove": "Remove page context",

@@ -30,9 +30,11 @@ export function ThinkingPicker({
   value,
   levels,
   canEdit = true,
+  disabled = false,
   allowClear = true,
   variant = "chip",
   showLabel = true,
+  inheritance,
   onChange,
 }: {
   /** Persisted thinking_level — "" means "follow local CLI config". */
@@ -44,10 +46,14 @@ export function ThinkingPicker({
   levels: RuntimeModelThinkingLevel[];
   /** When false, render a static read-only display and skip the popover. */
   canEdit?: boolean;
+  /** Temporary or capability-based lock; retain a visible, disabled trigger. */
+  disabled?: boolean;
   /** ZCode requires an explicit reasoning level for reasoning-capable models. */
   allowClear?: boolean;
   variant?: "chip" | "field";
   showLabel?: boolean;
+  /** Null follows agent settings rather than choosing an empty CLI-default token. */
+  inheritance?: { label: string; active: boolean; onSelect: () => Promise<void> | void };
   onChange: (next: string) => Promise<void> | void;
 }) {
   const { t } = useT("agents");
@@ -58,16 +64,17 @@ export function ThinkingPicker({
   // that trimmed the catalog): show the raw token so the user can see what
   // is actually persisted and clear it, rather than silently labelling it
   // "Default" when the backend would still send the stale value.
-  const triggerLabel = selected
-    ? selected.label
-    : value || t(($) => $.pickers.thinking_default);
+  const triggerLabel = inheritance?.active
+    ? inheritance.label
+    : selected?.label ?? (value || t(($) => $.pickers.thinking_default));
   const triggerTitle = t(($) => $.pickers.thinking_tooltip, {
     value: triggerLabel,
   });
 
+  /** Keep disabled catalog choices from writing and distinguish inheritance from equal tokens. */
   const select = async (next: string) => {
     setOpen(false);
-    if (next !== value) await onChange(next);
+    if (!disabled && (inheritance?.active || next !== value)) await onChange(next);
   };
 
   if (!canEdit) {
@@ -98,8 +105,8 @@ export function ThinkingPicker({
 
   const picker = (
     <PropertyPicker
-      open={open}
-      onOpenChange={setOpen}
+      open={open && !disabled}
+      onOpenChange={(next) => setOpen(next && !disabled)}
       width={
         variant === "field"
           ? "w-[var(--anchor-width)] min-w-[14rem] max-w-md"
@@ -110,10 +117,11 @@ export function ThinkingPicker({
       triggerRender={
         <button
           type="button"
+          disabled={disabled}
           className={
             variant === "field"
               ? `${showLabel ? "mt-1.5 " : ""}flex min-h-10 w-full min-w-0 items-center gap-2 rounded-lg border border-input bg-transparent px-3 text-left text-body transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50`
-              : CHIP_CLASS
+              : `${CHIP_CLASS} disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50`
           }
           aria-label={triggerTitle}
         />
@@ -149,7 +157,7 @@ export function ThinkingPicker({
       {levels.map((l) => (
         <PickerItem
           key={l.value}
-          selected={l.value === value}
+          selected={!inheritance?.active && l.value === value}
           onClick={() => void select(l.value)}
         >
           {/* PickerItem wraps children in a flex `<span>`. Putting a
@@ -174,7 +182,18 @@ export function ThinkingPicker({
         </PickerItem>
       ))}
 
-      {value && allowClear && (
+      {inheritance ? (
+        <PickerItem
+          selected={inheritance.active}
+          emptyValue
+          onClick={() => {
+            setOpen(false);
+            if (!disabled) void inheritance.onSelect();
+          }}
+        >
+          {inheritance.label}
+        </PickerItem>
+      ) : value && allowClear ? (
         <TooltipHint label={t(($) => $.pickers.thinking_clear_title)}>
           <button
             type="button"
@@ -184,7 +203,7 @@ export function ThinkingPicker({
             {t(($) => $.pickers.thinking_clear)}
           </button>
         </TooltipHint>
-      )}
+      ) : null}
     </PropertyPicker>
   );
 

@@ -988,6 +988,7 @@ function RunListRow({ run, issueId, showIssue, costWidth }: { run: TimelineRun; 
             task={task}
             agentName={agentName}
             isLive={task.status === "running"}
+            parentId={task.trigger_comment_id}
             title={t(($) => $.execution_log.transcript_tooltip)}
           />
           {canRetryRun(task) && <RetryRunButton task={task} issueId={issueId} />}

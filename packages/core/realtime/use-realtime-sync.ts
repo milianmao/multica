@@ -10,7 +10,8 @@ import {
   runWithSyncCauses,
   type SyncCauses,
 } from "../api/realtime-observer";
-import type { WSMessage } from "../types/events";
+import type { WSMessage, ChatSessionUpdatedPayload } from "../types/events";
+import { ChatSessionUpdatedPayloadSchema } from "../api/schemas";
 import type { StoreApi, UseBoundStore } from "zustand";
 import type { AuthState } from "../auth/store";
 import { createLogger } from "../logger";
@@ -361,15 +362,6 @@ export async function applyChatQuickActionsToCache(
   }
 }
 
-type ChatSessionUpdatedPayload = {
-  chat_session_id: string;
-  title?: string;
-  project_id?: string | null;
-  pinned?: boolean;
-  status?: "active" | "archived";
-  updated_at?: string;
-};
-
 /**
  * Patch the cached sessions row for a `chat:session_updated` event (rename,
  * pin/unpin, archive/unarchive from any tab/device) instead of refetching the
@@ -392,27 +384,38 @@ export function applyChatSessionUpdatedToCache(
   wsId: string,
   payload: ChatSessionUpdatedPayload,
 ): void {
+  const parsed = ChatSessionUpdatedPayloadSchema.safeParse(payload);
+  if (!parsed.success) return;
+  const event = parsed.data;
+  if (event.workspace_id && event.workspace_id !== wsId) return;
+  const patch = (session: ChatSession): ChatSession => ({
+    ...session,
+    title: event.title ?? session.title,
+    ...("project_id" in event ? { project_id: event.project_id } : {}),
+    ...("execution_config" in event ? { execution_config: event.execution_config ?? {} } : {}),
+    ...("execution_config" in event || "effective_execution_config" in event
+      ? { effective_execution_config: event.effective_execution_config } : {}),
+    ...("execution_config_supported" in event ? { execution_config_supported: event.execution_config_supported } : {}),
+    ...("execution_config_capabilities" in event ? { execution_config_capabilities: event.execution_config_capabilities } : {}),
+    pinned: event.pinned ?? session.pinned,
+    status: event.status ?? session.status,
+    updated_at: event.updated_at ?? session.updated_at,
+    ...(event.status === "archived" ? { unread_count: 0, has_unread: false } : {}),
+  });
+  qc.setQueryData<ChatSession>(chatKeys.session(wsId, event.chat_session_id), (old) =>
+    old ? patch(old) : old,
+  );
   qc.setQueryData<ChatSession[]>(chatKeys.sessions(wsId), (old) => {
     if (!old) return old;
-    const next = old.map((s) =>
-      s.id === payload.chat_session_id
-        ? {
-            ...s,
-            title: payload.title ?? s.title,
-            ...("project_id" in payload ? { project_id: payload.project_id } : {}),
-            pinned: payload.pinned ?? s.pinned,
-            status: payload.status ?? s.status,
-            updated_at: payload.updated_at ?? s.updated_at,
-            ...(payload.status === "archived"
-              ? { unread_count: 0, has_unread: false }
-              : {}),
-          }
-        : s,
-    );
-    return payload.pinned === undefined && payload.status === undefined
-      ? next
-      : sortChatSessions(next);
+    const next = old.map((session) => session.id === event.chat_session_id ? patch(session) : session);
+    return event.pinned === undefined && event.status === undefined ? next : sortChatSessions(next);
   });
+  // Raw-only events cannot resolve inherited values. Refetch the server
+  // projection rather than displaying the previous effective model forever.
+  if ("execution_config" in event && !("effective_execution_config" in event)) {
+    void qc.invalidateQueries({ queryKey: chatKeys.session(wsId, event.chat_session_id) });
+    void qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+  }
 }
 
 function removeChatMessageFromPageCache(
@@ -904,6 +907,10 @@ export function useRealtimeSync(
         const wsId = getCurrentWsId();
         if (wsId) {
           qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
+          // Chat projections inherit agent settings; only the server resolves
+          // effective model, effort, and tier after an agent configuration change.
+          qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+          qc.invalidateQueries({ queryKey: [...chatKeys.all(wsId), "session"] });
           // Squad members status is derived per agent, so any agent
           // change (status flip, archive, runtime swap) needs to refresh the
           // per-squad members-status cache without refetching the static squad
@@ -1984,6 +1991,7 @@ export function useRealtimeSync(
       chatWsLogger.info("chat:session_created (global)", payload);
       if (payload.workspace_id !== getCurrentWsId()) return;
       invalidateSessionLists();
+      qc.invalidateQueries({ queryKey: chatKeys.session(payload.workspace_id, payload.chat_session_id) });
     });
 
     // chat:session_updated fires after the creator renames, pins, or archives

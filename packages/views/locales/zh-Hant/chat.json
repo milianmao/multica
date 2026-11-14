@@ -23,6 +23,25 @@
     "all_chats": "全部對話",
     "more_other": "另外 {{count}} 個對話"
   },
+  "execution_config": {
+    "label": "執行設定",
+    "inherit": "沿用 AI 代理",
+    "model": "模型",
+    "thinking": "思考強度",
+    "approval": "審批策略",
+    "approval_inherit": "沿用現有",
+    "approval_on_request": "按需審批",
+    "approval_full_access": "完全存取",
+    "unsupported": "目前後端不支援會話執行設定。",
+    "model_unsupported": "此執行時不支援模型覆寫。",
+    "thinking_unsupported": "此執行時不支援思考強度覆寫。",
+    "thinking_unavailable": "目前模型沒有可選的思考強度。",
+    "catalog_unavailable": "暫時無法取得執行時模型目錄。",
+    "refresh_catalog": "重新整理模型目錄",
+    "approval_unsupported": "首期僅 Codex 支援原生審批。",
+    "full_access_hint": "完全存取不受沙箱邊界限制，可無需詢問執行命令和修改檔案。",
+    "save_failed": "儲存失敗，已保留原選擇。"
+  },
   "input": {
     "page_context_add": "將目前頁面加入為上下文",
     "page_context_remove": "移除頁面上下文",

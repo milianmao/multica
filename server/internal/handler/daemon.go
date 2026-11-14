@@ -3052,6 +3052,22 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	if rc := bytes.TrimSpace(agent.RuntimeConfig); len(rc) > 0 && !bytes.Equal(rc, []byte("{}")) && !bytes.Equal(rc, []byte("null")) {
 		runtimeConfig = json.RawMessage(agent.RuntimeConfig)
 	}
+	executionConfig, configErr := service.TaskExecutionConfig(task.Context)
+	if configErr != nil {
+		return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, h.failClaimedTaskBeforeLaunch(
+			r.Context(), task, "The saved chat execution configuration is invalid.",
+			taskfailure.ReasonInvalidTaskIdentity, "execution_config_invalid", http.StatusBadRequest, configErr.Error(),
+		)
+	}
+	if executionConfig != nil && executionConfig.ApprovalPolicy == "on-request" &&
+		(runtime.Provider != "codex" || !requestHasClientCapability(r, protocol.DaemonCapabilityNativeApprovalV1)) {
+		return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, h.failClaimedTaskBeforeLaunch(
+			r.Context(), task, "On-request approval requires Codex and a daemon supporting native-approval-v1. Upgrade the daemon before retrying; full access was not enabled.",
+			taskfailure.ReasonInvalidTaskIdentity, "native_approval_unsupported", http.StatusConflict, "native approval is unsupported by this runtime or daemon",
+		)
+	}
+	resp.ExecutionConfig = executionConfig
+	resp.NativeApprovalSupported = requestHasClientCapability(r, protocol.DaemonCapabilityNativeApprovalV1)
 	resp.Agent = &TaskAgentData{
 		ID:                    uuidToString(agent.ID),
 		Name:                  agent.Name,
@@ -3064,6 +3080,11 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		ServiceTier:           agent.ServiceTier.String,
 		RuntimeConfig:         runtimeConfig,
 		DisabledRuntimeSkills: disabledRuntimeSkillsFor(agent.DisabledRuntimeSkills, runtimeID, runtime.Provider),
+	}
+	if executionConfig != nil {
+		resp.Agent.Model = executionConfig.Model
+		resp.Agent.ThinkingLevel = executionConfig.ThinkingLevel
+		resp.Agent.ServiceTier = executionConfig.ServiceTier
 	}
 	// Snapshot the agent's persistent OpenClaw model override for this claim.
 	// It applies to every claim until changed or cleared; later edits do not

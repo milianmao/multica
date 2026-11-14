@@ -25,6 +25,25 @@
     "more_one": "{{count}} chat más",
     "more_other": "{{count}} chats más"
   },
+  "execution_config": {
+    "label": "Ajustes de ejecución",
+    "inherit": "Usar ajustes del agente",
+    "model": "Modelo",
+    "thinking": "Esfuerzo de razonamiento",
+    "approval": "Permisos",
+    "approval_inherit": "Mantener el comportamiento actual",
+    "approval_on_request": "Preguntar cuando sea necesario",
+    "approval_full_access": "Acceso completo",
+    "unsupported": "Este servidor no admite ajustes de ejecución específicos para el chat.",
+    "model_unsupported": "Este entorno de ejecución no admite cambios de modelo.",
+    "thinking_unsupported": "Este entorno de ejecución no admite cambios en el esfuerzo de razonamiento.",
+    "thinking_unavailable": "El modelo actual no ofrece niveles de razonamiento seleccionables.",
+    "catalog_unavailable": "El catálogo de modelos del entorno de ejecución no está disponible.",
+    "refresh_catalog": "Actualizar modelos",
+    "approval_unsupported": "Por ahora, las aprobaciones nativas solo están disponibles para Codex.",
+    "full_access_hint": "El acceso completo elimina los límites del sandbox. Permite ejecutar comandos y modificar archivos sin preguntar.",
+    "save_failed": "No se pudieron guardar estos ajustes. Se conservó la selección anterior."
+  },
   "input": {
     "page_context_add": "Añadir esta página como contexto",
     "page_context_remove": "Quitar el contexto de la página",

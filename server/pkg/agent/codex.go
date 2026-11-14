@@ -381,12 +381,15 @@ type codexBackend struct {
 	cfg Config
 }
 
+// buildCodexArgs pins stdio transport and applies task approval after user arguments,
+// so launch overrides cannot weaken the requested execution restrictions.
 func buildCodexArgs(opts ExecOptions, logger *slog.Logger) []string {
 	args := []string{"app-server", "--listen", "stdio://"}
 	launchArgs := NormalizeCodexLaunchArgs(opts.ExtraArgs, opts.CustomArgs, opts.McpConfig, logger)
 	if opts.ServiceTier == codexFastServiceTier {
 		launchArgs = enforceCodexFastMode(launchArgs, logger)
 	}
+	launchArgs = applyCodexApprovalLaunchArgs(launchArgs, opts.ApprovalPolicy, logger)
 	return append(args, launchArgs...)
 }
 
@@ -1079,7 +1082,13 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	return &Session{Supplement: supplement, SupplementReady: supplementReady, Messages: msgCh, Result: resCh}, nil
 }
 
+// executeOnce runs one app-server process with independent RPC reading and
+// native approval workers. Explicit policies are validated before launch and
+// verified before turn submission; pending waits pause only inactivity clocks.
 func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts ExecOptions, attempt int) (*Session, error) {
+	if err := validateCodexApprovalOptions(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "codex"
@@ -1155,6 +1164,11 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		// only needs the conflicting disable/config overrides removed.
 		runtimeCmd = runtimeCmd.withFilteredPrefix(func(prefix []string) []string {
 			return stripCodexFastModeConflicts(prefix, b.cfg.Logger)
+		})
+	}
+	if opts.ApprovalPolicy != "" {
+		runtimeCmd = runtimeCmd.withFilteredPrefix(func(prefix []string) []string {
+			return stripCodexApprovalOverrides(prefix, opts.ApprovalPolicy, b.cfg.Logger)
 		})
 	}
 	codexArgs := buildCodexArgs(opts, b.cfg.Logger)
@@ -1275,6 +1289,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	c = &codexClient{
 		cfg:                      b.cfg,
 		stdin:                    stdin,
+		approvals:                newCodexApprovalState(runCtx, opts),
 		pending:                  make(map[int]*pendingRPC),
 		processDone:              make(chan struct{}),
 		handshakeTimeout:         handshakeTimeout,
@@ -1381,7 +1396,9 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	var cleanupWaitErr error
 	drainAndWait := func() {
 		waitOnce.Do(func() {
-			stdin.Close()
+			// Release pipe writers before joining workers that may be inside Write.
+			c.closeStdin()
+			c.approvals.stopAndWait()
 
 			grace := codexGracefulShutdown()
 			waitCh := make(chan struct{})
@@ -1627,7 +1644,8 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		// MUL-2339 — Trump's constraint that the three injection points
 		// must not drift independently).
 		applyCodexReasoningEffort(turnParams, opts.ThinkingLevel)
-		applyCodexServiceTier(turnParams, opts.ServiceTier)
+		applyCodexSnapshotServiceTier(turnParams, opts)
+		applyCodexTurnApprovalParams(turnParams, opts)
 		waitingForTurn := true
 		var timeoutDiagnostic codexTimeoutDiagnostic
 		var processExitErr error
@@ -1638,6 +1656,8 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				classifyCodexStartupStderr(stderrBuf.Tail(), strings.HasSuffix(outcome, "_timeout")),
 			)
 		}
+		// finishTurn preserves approval failures on aborted native turns instead of
+		// misreporting them as a user stop or successful completion.
 		finishTurn := func(aborted bool) {
 			waitingForTurn = false
 			switch {
@@ -1646,6 +1666,9 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				finalStatus = "aborted"
 				if errMsg := c.getTurnError(); errMsg != "" {
 					finalError = errMsg
+					if c.approvals != nil {
+						finalStatus = "failed"
+					}
 				} else {
 					finalError = "turn was aborted"
 				}
@@ -1712,8 +1735,37 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		}
 		defer stopFirstTurnNoProgressTimer()
 
+		var approvalChanged <-chan struct{}
+		if c.approvals != nil {
+			approvalChanged = c.approvals.changed
+		}
+		// Native waits pause only inactivity clocks. A resolved or cancelled
+		// approval starts fresh inactivity budgets without extending runCtx.
+		refreshApprovalTimers := func() {
+			if c.approvals.count() > 0 {
+				stopTimer(semanticTimer)
+				stopFirstTurnNoProgressTimer()
+				return
+			}
+			lastSemanticActivity = time.Now()
+			resetTimer(semanticTimer, semanticInactivityTimeout)
+			if firstTurnStarted && !firstTurnProgressObserved {
+				if firstTurnNoProgressTimer == nil {
+					firstTurnNoProgressTimer = time.NewTimer(firstTurnNoProgressTimeout)
+				} else {
+					resetTimer(firstTurnNoProgressTimer, firstTurnNoProgressTimeout)
+				}
+				firstTurnNoProgressTimerC = firstTurnNoProgressTimer.C
+			}
+		}
+		if c.approvals.count() > 0 {
+			refreshApprovalTimers()
+		}
+
 		for waitingForTurn {
 			select {
+			case <-approvalChanged:
+				refreshApprovalTimers()
 			case aborted := <-turnDone:
 				finishTurn(aborted)
 			case <-guardianRateLimitTrip:
@@ -1742,7 +1794,21 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					}
 					stopFirstTurnNoProgressTimer()
 				}
+				if c.approvals.count() > 0 {
+					refreshApprovalTimers()
+				}
 			case <-firstTurnNoProgressTimerC:
+				// An approval transition can race an already-ready timer.
+				select {
+				case <-approvalChanged:
+					refreshApprovalTimers()
+					continue
+				default:
+				}
+				if c.approvals.count() > 0 {
+					refreshApprovalTimers()
+					continue
+				}
 				waitingForTurn = false
 				finishFirstItemWait("no_progress_timeout")
 				finalStatus = "timeout"
@@ -1763,6 +1829,16 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					"last_activity", lastSemanticActivityDescription,
 				)
 			case <-semanticTimer.C:
+				select {
+				case <-approvalChanged:
+					refreshApprovalTimers()
+					continue
+				default:
+				}
+				if c.approvals.count() > 0 {
+					refreshApprovalTimers()
+					continue
+				}
 				waitingForTurn = false
 				finishFirstItemWait("semantic_inactivity_timeout")
 				finalStatus = "timeout"
@@ -1824,6 +1900,11 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		// window expires. A clean shutdown lets codex flush OTEL telemetry;
 		// a stuck process is killed via the process-group SIGKILL.
 		drainAndWait()
+		if c.approvals != nil && finalStatus == "completed" {
+			if errMsg := c.getTurnError(); errMsg != "" {
+				finalStatus, finalError = "failed", errMsg
+			}
+		}
 
 		if processExitErr != nil {
 			finalError = withAgentStderr(processExitErr.Error(), "codex", sanitizeCodexDiagnostic(stderrBuf.Tail()))
@@ -2005,15 +2086,26 @@ func codexTurnInput(prompt string, resumeExpected, resumed bool, notice string) 
 // turn/start calls must reference, and resumed indicates whether the prior
 // thread was picked up (only useful for logging).
 func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions, logger *slog.Logger) (string, bool, error) {
+	if err := c.verifyCodexWindowsSandbox(ctx, opts.ApprovalPolicy); err != nil {
+		return "", false, err
+	}
 	if priorThreadID := opts.ResumeSessionID; priorThreadID != "" {
-		// thread/resume reuses the thread's persisted model and reasoning
-		// effort; only override fields the daemon actually cares about.
+		// Empty legacy overrides inherit history. A cleared snapshot instead
+		// selects the current runtime default, never the thread's saved model.
 		// developerInstructions stays nil for the reason given on thread/start
 		// below.
+		resumeModel := opts.Model
+		if opts.ExecutionConfigPresent && resumeModel == "" && opts.ThinkingLevel == "" {
+			var err error
+			resumeModel, err = c.defaultModelForExecutionSnapshot(ctx, opts.Cwd)
+			if err != nil {
+				return "", false, err
+			}
+		}
 		resumeParams := map[string]any{
 			"threadId":              priorThreadID,
 			"cwd":                   opts.Cwd,
-			"model":                 nilIfEmpty(opts.Model),
+			"model":                 nilIfEmpty(resumeModel),
 			"developerInstructions": nil,
 			// Only omit history from the response, not the resumed model context.
 			// We need the thread ID, not an unbounded single-line turns payload.
@@ -2025,7 +2117,8 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		// agent's thinking_level since. See MUL-2339 — Elon flagged that
 		// resume must honour the live config, not the stored one.
 		applyCodexReasoningEffort(resumeParams, opts.ThinkingLevel)
-		applyCodexServiceTier(resumeParams, opts.ServiceTier)
+		applyCodexSnapshotServiceTier(resumeParams, opts)
+		applyCodexThreadApprovalParams(resumeParams, opts.ApprovalPolicy)
 		c.threadSetupMethod = "thread/resume"
 		c.threadSetupStarted = time.Now()
 		logger.Info("codex lifecycle",
@@ -2039,6 +2132,9 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		)
 		resumeResult, err := c.request(ctx, "thread/resume", resumeParams)
 		if err == nil {
+			if err := verifyCodexOnRequestThread(resumeResult, opts.ApprovalPolicy); err != nil {
+				return "", false, err
+			}
 			if threadID := extractThreadID(resumeResult); threadID != "" {
 				logger.Info("codex lifecycle",
 					"phase", "thread_resume_response",
@@ -2085,7 +2181,8 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		"persistExtendedHistory": true,
 	}
 	applyCodexReasoningEffort(startParams, opts.ThinkingLevel)
-	applyCodexServiceTier(startParams, opts.ServiceTier)
+	applyCodexSnapshotServiceTier(startParams, opts)
+	applyCodexThreadApprovalParams(startParams, opts.ApprovalPolicy)
 	c.threadSetupMethod = "thread/start"
 	c.threadSetupStarted = time.Now()
 	logger.Info("codex lifecycle",
@@ -2100,6 +2197,9 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 	startResult, err := c.request(ctx, "thread/start", startParams)
 	if err != nil {
 		return "", false, fmt.Errorf("codex thread/start failed: %w", err)
+	}
+	if err := verifyCodexOnRequestThread(startResult, opts.ApprovalPolicy); err != nil {
+		return "", false, err
 	}
 	threadID := extractThreadID(startResult)
 	if threadID == "" {
@@ -2137,6 +2237,66 @@ func (c *codexClient) setThreadName(ctx context.Context, threadID, name string) 
 		"name":     name,
 	})
 	return err
+}
+
+// defaultModelForExecutionSnapshot resolves the app-server's current default
+// before an unpinned snapshot resumes. The task cwd's effective configured model
+// takes precedence over the catalog default. An explicit model override prevents
+// native resume metadata from restoring the old model and reasoning effort.
+// Failure is actionable rather than silently reverting to saved thread choices.
+func (c *codexClient) defaultModelForExecutionSnapshot(ctx context.Context, cwd string) (string, error) {
+	params := map[string]any{"includeLayers": false}
+	if cwd != "" {
+		params["cwd"] = cwd
+	}
+	result, err := c.request(ctx, "config/read", params)
+	if err != nil {
+		return "", fmt.Errorf("codex execution snapshot cannot read effective config: %w", err)
+	}
+	var config struct {
+		Config *struct {
+			Model string `json:"model"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(result, &config); err != nil {
+		return "", fmt.Errorf("codex execution snapshot cannot read effective config: %w", err)
+	}
+	if config.Config == nil {
+		return "", errors.New("codex execution snapshot cannot read effective config: missing config object")
+	}
+	if config.Config.Model != "" {
+		return config.Config.Model, nil
+	}
+	cursor := ""
+	for {
+		params := map[string]any{"includeHidden": true, "limit": 100}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		result, err := c.request(ctx, "model/list", params)
+		if err != nil {
+			return "", fmt.Errorf("codex execution snapshot cannot resolve the runtime default model: %w", err)
+		}
+		var page struct {
+			Data []struct {
+				Model     string `json:"model"`
+				IsDefault bool   `json:"isDefault"`
+			} `json:"data"`
+			NextCursor string `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(result, &page); err != nil {
+			return "", fmt.Errorf("codex execution snapshot cannot read the runtime default model: %w", err)
+		}
+		for _, model := range page.Data {
+			if model.IsDefault && model.Model != "" {
+				return model.Model, nil
+			}
+		}
+		if page.NextCursor == "" {
+			return "", errors.New("codex execution snapshot cannot resolve the runtime default model; restoring the old thread model and effort is forbidden")
+		}
+		cursor = page.NextCursor
+	}
 }
 
 // applyCodexReasoningEffort writes the per-agent thinking_level into a
@@ -2180,6 +2340,15 @@ func applyCodexServiceTier(params map[string]any, tier string) {
 		return
 	}
 	params["serviceTier"] = tier
+}
+
+// applyCodexSnapshotServiceTier distinguishes an explicit snapshot clear from
+// a legacy omitted override. Native serviceTier null clears persisted routing.
+func applyCodexSnapshotServiceTier(params map[string]any, opts ExecOptions) {
+	applyCodexServiceTier(params, opts.ServiceTier)
+	if params != nil && opts.ExecutionConfigPresent && opts.ServiceTier == "" {
+		params["serviceTier"] = nil
+	}
 }
 
 func resetTimer(timer *time.Timer, d time.Duration) {
@@ -2403,9 +2572,16 @@ func describeCodexSemanticActivity(msg Message) string {
 
 // ── codexClient: JSON-RPC 2.0 transport ──
 
+// codexClient multiplexes RPC replies, native approval waits and turn events.
+// Writes are serialized independently of pending RPC state and the stdout reader.
 type codexClient struct {
-	cfg                    Config
-	stdin                  interface{ Write([]byte) (int, error) }
+	cfg       Config
+	stdin     interface{ Write([]byte) (int, error) }
+	writeMu   sync.Mutex
+	approvals *codexApprovalState
+	// approvalItems holds accepted raw item snapshots until native completion;
+	// it is confined to stdout, while approval workers receive independent JSON.
+	approvalItems          map[codexApprovalItemKey]json.RawMessage
 	mu                     sync.Mutex
 	nextID                 int
 	pending                map[int]*pendingRPC
@@ -2633,9 +2809,11 @@ func (e *codexHandshakeTimeoutError) Unwrap() error {
 	return context.DeadlineExceeded
 }
 
+// isCodexHandshakeRPC bounds setup RPCs, including sandbox readiness, independently
+// of the overall execution lifetime.
 func isCodexHandshakeRPC(method string) bool {
 	switch method {
-	case "initialize", "thread/start", "thread/resume", "thread/name/set", "turn/start":
+	case "initialize", "thread/start", "thread/resume", "thread/name/set", "turn/start", "windowsSandbox/readiness":
 		return true
 	default:
 		return false
@@ -2715,6 +2893,8 @@ func interruptCodexTurn(c *codexClient, threadID string, turnDone <-chan bool, c
 	}
 }
 
+// request registers one RPC before writing it and waits independently of the
+// stdout reader. Handshake deadlines and process exit release pending callers.
 func (c *codexClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -2749,15 +2929,7 @@ func (c *codexClient) request(ctx context.Context, method string, params any) (j
 		"method":  method,
 		"params":  params,
 	}
-	data, err := json.Marshal(msg)
-	if err != nil {
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
-		return nil, err
-	}
-	data = append(data, '\n')
-	if _, err := c.stdin.Write(data); err != nil {
+	if err := c.writeRPCContext(requestCtx, msg); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -2804,39 +2976,68 @@ func (c *codexClient) request(ctx context.Context, method string, params any) (j
 	}
 }
 
+// closeStdin cancels pipe I/O without waiting for writeMu: its owner may be
+// blocked in Write. Cleanup must release it before joining native workers.
+func (c *codexClient) closeStdin() {
+	if stdin, ok := c.stdin.(io.Closer); ok {
+		_ = stdin.Close()
+	}
+}
+
+// writeRPCContext bounds both write-lock contention and synchronous pipe I/O.
+// The cancellation callback is joined, not left behind after the RPC returns;
+// it stops once writing finishes so response cancellation can still interrupt gracefully.
+func (c *codexClient) writeRPCContext(ctx context.Context, message any) error {
+	if ctx.Err() != nil {
+		return codexRequestContextError(ctx)
+	}
+	writeCancelled := make(chan struct{})
+	stopWriteCancel := context.AfterFunc(ctx, func() {
+		c.closeStdin()
+		close(writeCancelled)
+	})
+	err := c.writeRPC(message)
+	if !stopWriteCancel() {
+		<-writeCancelled
+	}
+	if ctx.Err() != nil {
+		return codexRequestContextError(ctx)
+	}
+	return err
+}
+
+// writeRPC preserves whole JSONL messages when approval and RPC goroutines write
+// concurrently. A short write is not a delivered native approval response.
+func (c *codexClient) writeRPC(message any) error {
+	data, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	n, err := c.stdin.Write(data)
+	if err == nil && n != len(data) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+// notify sends a transport notification without creating a pending RPC.
 func (c *codexClient) notify(method string) {
-	msg := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
+	if err := c.writeRPC(map[string]any{"jsonrpc": "2.0", "method": method}); err != nil {
+		c.markProcessExited(fmt.Errorf("write %s: %w", method, err))
 	}
-	data, _ := json.Marshal(msg)
-	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
 }
 
-func (c *codexClient) respond(id int, result any) {
-	msg := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"result":  result,
-	}
-	data, _ := json.Marshal(msg)
-	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+// respond echoes the native ID without narrowing string or numeric IDs.
+func (c *codexClient) respond(id any, result any) error {
+	return c.writeRPC(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
 
-func (c *codexClient) respondError(id int, code int, message string) {
-	msg := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"error": map[string]any{
-			"code":    code,
-			"message": message,
-		},
-	}
-	data, _ := json.Marshal(msg)
-	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+// respondError explicitly rejects interactions unsupported by this bridge.
+func (c *codexClient) respondError(id any, code int, message string) error {
+	return c.writeRPC(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
 }
 
 func (c *codexClient) closeAllPending(err error) {
@@ -2848,7 +3049,12 @@ func (c *codexClient) closeAllPending(err error) {
 	}
 }
 
+// markProcessExited cancels native waits and publishes the first transport
+// failure once, releasing every RPC caller without duplicating processDone.
 func (c *codexClient) markProcessExited(err error) {
+	if c.approvals != nil {
+		c.approvals.cancel()
+	}
 	if err == nil {
 		err = errCodexProcessExited
 	}
@@ -2934,6 +3140,16 @@ func (c *codexClient) handleLine(line string) {
 
 	// Notification (no id, has method)
 	if _, hasMethod := raw["method"]; hasMethod {
+		if c.approvals != nil && string(raw["method"]) == `"serverRequest/resolved"` {
+			var params struct {
+				RequestID json.RawMessage `json:"requestId"`
+			}
+			if json.Unmarshal(raw["params"], &params) == nil {
+				if id, err := canonicalApprovalID(params.RequestID); err == nil {
+					c.approvals.resolve(id)
+				}
+			}
+		}
 		c.handleNotification(raw)
 	}
 }
@@ -2967,36 +3183,76 @@ func (c *codexClient) handleResponse(raw map[string]json.RawMessage) {
 	}
 }
 
+// handleServerRequest registers supported native approvals before dispatching
+// human waits asynchronously. A native request is semantic progress even without
+// a preceding item, preventing startup-only replay after human work. Legacy
+// unattended runs keep their auto-replies.
 func (c *codexClient) handleServerRequest(raw map[string]json.RawMessage) {
-	var id int
-	_ = json.Unmarshal(raw["id"], &id)
-
+	id, err := canonicalApprovalID(raw["id"])
+	if err != nil {
+		c.setTurnError("invalid codex native request ID: " + err.Error())
+		_ = c.respondError(nil, -32600, "native request ID must be a JSON string or number")
+		return
+	}
 	var method string
 	_ = json.Unmarshal(raw["method"], &method)
-
-	// Auto-approve all exec/patch requests in daemon mode
+	kind := ""
 	switch method {
-	case "item/commandExecution/requestApproval", "execCommandApproval":
-		c.respond(id, map[string]any{"decision": "accept"})
-	case "item/fileChange/requestApproval", "applyPatchApproval":
-		c.respond(id, map[string]any{"decision": "accept"})
+	case "item/commandExecution/requestApproval":
+		kind = "command"
+	case "item/fileChange/requestApproval":
+		kind = "file_change"
 	case "item/permissions/requestApproval":
-		c.respond(id, codexPermissionsApprovalResponse(raw["params"], c.cfg.Logger))
-	case "mcpServer/elicitation/request":
-		c.respond(id, map[string]any{"action": "accept", "content": nil, "_meta": nil})
+		kind = "permissions"
+	}
+	if c.approvals != nil && kind != "" {
+		displayParams, err := c.approvalDisplayParams(kind, raw["params"])
+		if err != nil {
+			c.setTurnError("invalid codex native approval params")
+			_ = c.respondError(json.RawMessage(id), -32602, "approval params must be a JSON object")
+			return
+		}
+		request := ApprovalRequest{ID: id, Kind: kind, Method: method, Params: displayParams}
+		ctx, err := c.approvals.begin(id)
+		if err != nil {
+			c.setTurnError("codex native approval registration failed: " + err.Error())
+			_ = c.respondError(json.RawMessage(id), -32600, err.Error())
+			return
+		}
+		if c.onSemanticActivity != nil {
+			c.onSemanticActivity("approval:" + kind)
+		}
+		go c.awaitApproval(ctx, request, raw["params"])
+		return
+	}
+	var result any
+	switch {
+	case c.approvals != nil:
+		err = fmt.Errorf("unsupported codex on-request interaction: %s", method)
+	case kind == "command" || kind == "file_change" || method == "execCommandApproval" || method == "applyPatchApproval":
+		result = map[string]any{"decision": "accept"}
+	case kind == "permissions":
+		result = codexPermissionsApprovalResponse(raw["params"], c.cfg.Logger)
+	case method == "mcpServer/elicitation/request":
+		result = map[string]any{"action": "accept", "content": nil, "_meta": nil}
 	default:
-		msg := fmt.Sprintf("unsupported codex app-server request: %s", method)
-		c.cfg.Logger.Warn("codex: unhandled server request", "method", method, "id", id)
-		c.setTurnError(msg)
-		c.respondError(id, -32601, msg)
+		err = fmt.Errorf("unsupported codex app-server request: %s", method)
+	}
+	if err != nil {
+		c.cfg.Logger.Warn("codex: unhandled server request", "method", method, "native_request_id", id)
+		c.setTurnError(err.Error())
+		err = c.respondError(json.RawMessage(id), -32601, err.Error())
+	} else {
+		err = c.respond(json.RawMessage(id), result)
+	}
+	if err != nil {
+		c.markProcessExited(fmt.Errorf("write codex native response: %w", err))
 	}
 }
 
-// codexPermissionsApprovalResponse builds the auto-grant reply for a Codex
-// item/permissions/requestApproval server request. In daemon mode there is no
-// human to approve, so we echo back the requested network / fileSystem profile
-// and scope it to the current turn, mirroring the other auto-accept branches in
-// handleServerRequest.
+// codexPermissionsApprovalResponse grants the requested network / fileSystem
+// subset for one turn. Both legacy unattended execution and an explicit human
+// approval use the original native params, never enriched or redacted UI data.
 //
 // The grant is intentionally limited to the network / fileSystem keys we
 // understand. A parse failure and any dropped key are logged so that a future
@@ -3053,6 +3309,14 @@ func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {
 			c.onDiscardedNotification(method, params)
 		}
 		return
+	}
+	if c.approvals != nil {
+		switch method {
+		case "item/started", "item/completed":
+			c.cacheApprovalItem(method, raw["params"])
+		case "turn/started", "turn/completed":
+			clear(c.approvalItems)
+		}
 	}
 
 	// Legacy codex/event notifications

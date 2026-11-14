@@ -205,6 +205,7 @@ func daemonHTTPClientCapabilities() string {
 func daemonCommonCapabilities() []string {
 	return []string{
 		protocol.DaemonCapabilitySkillBundlesV1,
+		protocol.DaemonCapabilityNativeApprovalV1,
 		protocol.DaemonCapabilityCoalescedCommentsV1,
 		protocol.DaemonCapabilityLocalWorktreeV1,
 		protocol.DaemonCapabilitySourceContextQuickCreateV1,

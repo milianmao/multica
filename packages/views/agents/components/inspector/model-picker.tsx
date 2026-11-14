@@ -36,8 +36,10 @@ export function ModelPicker({
   runtimeOnline,
   value,
   canEdit = true,
+  disabled = false,
   variant = "chip",
   showLabel = true,
+  inheritance,
   onChange,
 }: {
   runtimeId: string | null;
@@ -45,8 +47,12 @@ export function ModelPicker({
   value: string;
   /** When false, render a static read-only display and skip the popover. */
   canEdit?: boolean;
+  /** Temporary or capability-based lock; retain a visible, disabled trigger. */
+  disabled?: boolean;
   variant?: "chip" | "field";
   showLabel?: boolean;
+  /** Session null inheritance is distinct from the inspector's empty CLI default. */
+  inheritance?: { label: string; active: boolean; onSelect: () => Promise<void> | void };
   onChange: (next: string) => Promise<void> | void;
 }) {
   const { t } = useT("agents");
@@ -90,24 +96,28 @@ export function ModelPicker({
   );
   const canCreate = trimmedSearch.length > 0 && !exactMatch;
 
-  const triggerLabel = value || t(($) => $.pickers.model_default);
+  const triggerLabel = inheritance?.active
+    ? inheritance.label
+    : value || t(($) => $.pickers.model_default);
   const triggerTitle = t(($) => $.pickers.model_tooltip, { value: triggerLabel });
 
+  /** Close before writing, and never submit a stale option after capability loss. */
   const select = async (id: string) => {
     setOpen(false);
     setSearch("");
-    if (id !== value) await onChange(id);
+    if (!disabled && (inheritance?.active || id !== value)) await onChange(id);
   };
 
   const refresh = () => {
-    if (!runtimeId || !runtimeOnline) return;
+    if (disabled || !runtimeId || !runtimeOnline) return;
     void refreshRuntimeModels(queryClient, runtimeId).catch(() => {
       // React Query retains the last catalog and owns the error state. Avoid
       // turning a failed button action into an unhandled promise rejection.
     });
   };
 
-  if (!supported && !modelsQuery.isLoading) {
+  // Session controls retain a disabled entrance; the inspector keeps its static runtime-managed display.
+  if (!supported && !modelsQuery.isLoading && !inheritance) {
     if (variant === "field") {
       const control = (
         <div className="flex min-h-10 items-center gap-2 rounded-lg border border-dashed border-input bg-input/50 px-3 text-body text-muted-foreground">
@@ -160,8 +170,8 @@ export function ModelPicker({
 
   const picker = (
     <PropertyPicker
-      open={open}
-      onOpenChange={setOpen}
+      open={open && !disabled}
+      onOpenChange={(next) => setOpen(next && !disabled)}
       width={
         variant === "field"
           ? "w-[var(--anchor-width)] min-w-[16rem] max-w-md"
@@ -172,10 +182,11 @@ export function ModelPicker({
       triggerRender={
         <button
           type="button"
+          disabled={disabled}
           className={
             variant === "field"
               ? `${showLabel ? "mt-1.5 " : ""}flex min-h-10 w-full min-w-0 items-center gap-2 rounded-lg border border-input bg-transparent px-3 text-left text-body transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50`
-              : CHIP_CLASS
+              : `${CHIP_CLASS} disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50`
           }
           aria-label={triggerTitle}
         />
@@ -213,7 +224,7 @@ export function ModelPicker({
           onChange={setSearch}
           onRefresh={refresh}
           refreshing={modelsQuery.isFetching}
-          refreshDisabled={!runtimeOnline || !runtimeId}
+          refreshDisabled={disabled || !runtimeOnline || !runtimeId}
           compact
         />
       }
@@ -232,7 +243,7 @@ export function ModelPicker({
         filtered.map((m) => (
           <PickerItem
             key={m.id}
-            selected={m.id === value}
+            selected={!inheritance?.active && m.id === value}
             onClick={() => void select(m.id)}
             // Tooltip carries the canonical model id even when the chip
             // shows the friendlier label, so users can always see what
@@ -302,7 +313,19 @@ export function ModelPicker({
         </PickerItem>
       )}
 
-      {value && (
+      {inheritance ? (
+        <PickerItem
+          selected={inheritance.active}
+          emptyValue
+          onClick={() => {
+            setOpen(false);
+            setSearch("");
+            if (!disabled) void inheritance.onSelect();
+          }}
+        >
+          {inheritance.label}
+        </PickerItem>
+      ) : value ? (
         <TooltipHint label={t(($) => $.pickers.model_clear_title)}>
           <button
             type="button"
@@ -312,7 +335,7 @@ export function ModelPicker({
             {t(($) => $.pickers.model_clear)}
           </button>
         </TooltipHint>
-      )}
+      ) : null}
     </PropertyPicker>
   );
 

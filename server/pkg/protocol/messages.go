@@ -5,6 +5,9 @@ import "encoding/json"
 const (
 	DaemonCapabilitySkillBundlesV1      = "skill-bundles-v1"
 	DaemonCapabilityCoalescedCommentsV1 = "coalesced-comments-v1"
+	// DaemonCapabilityNativeApprovalV1 promises per-execution Codex approval
+	// registration, human decisions and strict sandbox enforcement.
+	DaemonCapabilityNativeApprovalV1 = "native-approval-v1"
 	// DaemonCapabilityLocalWorktreeV1 advertises that the daemon implements
 	// worktree mode for local_directory resources (execution_mode=worktree).
 	//

@@ -115,6 +115,30 @@ describe("SteerReceipts", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(api.retryTaskSupplement).toHaveBeenCalledWith("issue", turn, "steer"));
   });
+  it("keeps run-bound retries capability-gated without following a newer run", async () => {
+    vi.mocked(api.retryTaskSupplement).mockResolvedValue();
+    const running = task({ supplement_capability: "task-supplement-v1", can_supplement: true });
+    const client = render(<SteerReceipts issueId="issue" allowResend={false} entry={entry({ supplements: [
+      { task_id: turn, agent_id: "lambda", status: "failed", failure_reason: "timeout" },
+    ] })} />, [running]);
+    expect(screen.queryByRole("button", { name: "Send as a new run" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    const replacement = { ...running, id: "new-turn" };
+    await act(async () => {
+      client.setQueryData(issueKeys.tasks("issue"), [{ ...running, can_supplement: false }, replacement]);
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument());
+    await act(async () => { client.setQueryData(issueKeys.tasks("issue"), [running, replacement]); });
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeEnabled();
+    await act(async () => {
+      client.setQueryData(issueKeys.tasks("issue"), [{ ...running, status: "completed" }, replacement]);
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Send as a new run" })).not.toBeInTheDocument();
+    expect(api.retryTaskSupplement).not.toHaveBeenCalled();
+    expect(api.previewCommentTriggers).not.toHaveBeenCalled();
+    expect(api.createComment).not.toHaveBeenCalled();
+  });
 });
 
 describe("formatAgentNames", () => {

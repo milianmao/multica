@@ -23,6 +23,25 @@
     "all_chats": "全部对话",
     "more_other": "另外 {{count}} 个对话"
   },
+  "execution_config": {
+    "label": "执行配置",
+    "inherit": "沿用智能体",
+    "model": "模型",
+    "thinking": "思考强度",
+    "approval": "审批策略",
+    "approval_inherit": "沿用现有",
+    "approval_on_request": "按需审批",
+    "approval_full_access": "完全访问",
+    "unsupported": "当前后端不支持会话执行配置。",
+    "model_unsupported": "此运行时不支持模型覆盖。",
+    "thinking_unsupported": "此运行时不支持思考强度覆盖。",
+    "thinking_unavailable": "当前模型没有可选的思考强度。",
+    "catalog_unavailable": "暂时无法获取运行时模型目录。",
+    "refresh_catalog": "刷新模型目录",
+    "approval_unsupported": "首期仅 Codex 支持原生审批。",
+    "full_access_hint": "完全访问不受沙箱边界限制，可无需询问执行命令和修改文件。",
+    "save_failed": "保存失败，已保留原选择。"
+  },
   "input": {
     "page_context_add": "将当前页面添加为上下文",
     "page_context_remove": "移除页面上下文",

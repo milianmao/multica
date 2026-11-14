@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { ChatExecutionConfig } from "../types/chat";
 import { api } from "../api";
 import { useWorkspaceId } from "../hooks";
 import { chatKeys, sortChatSessions, QUICK_ACTIONS_PENDING_TIMEOUT_MS } from "./queries";
@@ -101,21 +102,28 @@ export function useUnpinChatAgent() {
   });
 }
 
+/** Publishes only validated, server-acknowledged sessions into workspace Query caches. */
 export function useCreateChatSession() {
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
 
   return useMutation({
-    mutationFn: (data: { agent_id: string; title?: string; project_id?: string | null }) => {
+    mutationFn: async (data: { agent_id: string; title?: string; project_id?: string | null; execution_config?: ChatExecutionConfig }) => {
       logger.info("createChatSession.start", {
         agent_id: data.agent_id,
         project_id: data.project_id,
         titleLength: data.title?.length ?? 0,
       });
-      return api.createChatSession(data);
+      const session = await api.createChatSession(data);
+      if (!session.id) throw new Error("Invalid chat session response");
+      return session;
     },
     onSuccess: (session) => {
       logger.info("createChatSession.success", { sessionId: session.id, agentId: session.agent_id });
+      qc.setQueryData(chatKeys.session(wsId, session.id), session);
+      qc.setQueryData<ChatSession[]>(chatKeys.sessions(wsId), (old) =>
+        sortChatSessions([session, ...(old ?? []).filter((row) => row.id !== session.id)]),
+      );
     },
     onError: (err) => {
       logger.error("createChatSession.error", err);
@@ -197,6 +205,35 @@ export function useUpdateChatSession() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+    },
+  });
+}
+
+/**
+ * Save overrides without optimistic labels or applying HTTP acknowledgements:
+ * a delayed response may predate another tab's write. Await server refetch on
+ * settlement so Infinity-cached list and detail projections converge.
+ */
+export function useSetChatSessionExecutionConfig() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+
+  return useMutation({
+    mutationFn: async ({ sessionId, config }: { sessionId: string; config: ChatExecutionConfig }) => {
+      const session = await api.updateChatSession(sessionId, { execution_config: config });
+      if (session.id !== sessionId || session.execution_config_supported !== true) {
+        throw new Error("Chat execution config is not supported by this server");
+      }
+      return session;
+    },
+    onError: (err, vars) => {
+      logger.error("setChatSessionExecutionConfig.error", { sessionId: vars.sessionId, err });
+    },
+    onSettled: async (_session, _error, { sessionId }) => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) }),
+        qc.invalidateQueries({ queryKey: chatKeys.session(wsId, sessionId) }),
+      ]);
     },
   });
 }

@@ -28,11 +28,11 @@ vi.mock("../../editor", () => ({ ReadonlyContent: () => <div /> }));
 vi.mock("../../common/task-transcript/agent-transcript-dialog", async () => {
   const { Dialog, DialogContent, DialogTitle } = await import("@multica/ui/components/ui/dialog");
   return {
-    AgentTranscriptDialog: ({ open, onOpenChange, finalFocus }: {
-      open: boolean; onOpenChange: (open: boolean) => void; finalFocus?: boolean;
+    AgentTranscriptDialog: ({ open, onOpenChange, finalFocus, parentId }: {
+      open: boolean; onOpenChange: (open: boolean) => void; finalFocus?: boolean; parentId?: string;
     }) => (
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent finalFocus={finalFocus}>
+        <DialogContent finalFocus={finalFocus} data-parent-id={parentId}>
           <DialogTitle>Full transcript</DialogTitle>
         </DialogContent>
       </Dialog>
@@ -45,7 +45,7 @@ const id = "4a2e8d1c-7f9b-4e2a-9c1d-123456789abc";
 const completed: AgentTask = {
   id, agent_id: "agent", runtime_id: "runtime", issue_id: "issue", status: "completed", priority: 0,
   created_at: "2026-09-07T00:00:00Z", started_at: "2026-09-07T00:00:00Z", dispatched_at: null,
-  completed_at: "2026-09-07T00:01:23Z", result: null, error: null,
+  completed_at: "2026-09-07T00:01:23Z", result: null, error: null, trigger_comment_id: "original-input",
 };
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -54,7 +54,7 @@ function renderHeaderRun() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const wrap = (children: ReactNode) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
   renderWithI18n(wrap(
-    <InlineCommentRun run={{ task: completed, commentId: "comment", hasReply: true }} presentation="header" />,
+    <InlineCommentRun run={{ task: completed, commentId: "comment", anchorCommentId: "visible-input", hasReply: true }} presentation="header" />,
   ));
   return screen.getByRole("button", { name: "Open full log" });
 }
@@ -66,7 +66,7 @@ describe("InlineCommentRun full log focus", () => {
     const trigger = renderHeaderRun();
 
     await user.click(trigger);
-    await screen.findByRole("dialog");
+    expect(await screen.findByRole("dialog")).toHaveAttribute("data-parent-id", "visible-input");
     await user.keyboard("{Escape}");
 
     // No focus on the trigger is what keeps its ring, its tooltip and the

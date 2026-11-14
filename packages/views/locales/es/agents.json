@@ -870,6 +870,15 @@
     "failed_indicator": "Fallida"
   },
   "transcript": {
+    "conversation": "Conversación",
+    "execution_log": "Registro de ejecución",
+    "final_reply": "Respuesta final",
+    "guidance_label": "Añadir indicaciones a esta ejecución",
+    "guidance_send": "Enviar indicaciones",
+    "guidance_failed": "No se pudieron enviar las indicaciones. Se conservó tu texto.",
+    "guidance_shared": "Visible en el hilo de comentarios de la tarea.",
+    "guidance_unavailable": "Esta ejecución no puede recibir indicaciones adicionales.",
+    "guidance_ended": "Esta ejecución ha terminado.",
     "dialog_title": "Transcripción de ejecución del agente",
     "status_running": "En ejecución",
     "status_completed": "Completada",

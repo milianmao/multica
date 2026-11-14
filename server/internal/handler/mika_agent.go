@@ -236,6 +236,8 @@ func (h *Handler) resolveMikaAgent(w http.ResponseWriter, r *http.Request, works
 	return created, true, true
 }
 
+// writeMikaAgentResponse keeps bootstrap ordering intact while enriching the
+// embedded session with API configuration metadata, not native approval readiness.
 func (h *Handler) writeMikaAgentResponse(w http.ResponseWriter, r *http.Request, agent db.Agent, workspaceID, userID, sessionTitle string, created bool) {
 	resp := h.agentToResponse(agent)
 	if err := h.enrichAgentResponseWithTargets(r.Context(), &resp, agent.ID); err != nil {
@@ -261,8 +263,13 @@ func (h *Handler) writeMikaAgentResponse(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, "failed to open the Mika conversation")
 		return
 	}
-	sessionResp := chatSessionToResponse(session)
-	out := mikaAgentResponse{AgentResponse: resp, OnboardingSession: &sessionResp}
+	sessions := []ChatSessionResponse{chatSessionToResponse(session)}
+	if err := h.hydrateChatExecutionConfigs(r.Context(), sessions); err != nil {
+		slog.Warn("mika agent: load chat execution config failed", append(logger.RequestAttrs(r), "error", err, "agent_id", uuidToString(agent.ID))...)
+		writeError(w, http.StatusInternalServerError, "failed to load chat execution config")
+		return
+	}
+	out := mikaAgentResponse{AgentResponse: resp, OnboardingSession: &sessions[0]}
 
 	if created {
 		writeJSON(w, http.StatusCreated, out)

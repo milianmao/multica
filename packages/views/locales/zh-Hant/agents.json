@@ -868,6 +868,15 @@
     "failed_indicator": "失敗"
   },
   "transcript": {
+    "conversation": "對話",
+    "execution_log": "執行日誌",
+    "final_reply": "最終回覆",
+    "guidance_label": "為本次執行追加說明",
+    "guidance_send": "追加說明",
+    "guidance_failed": "無法追加說明，輸入已保留。",
+    "guidance_shared": "可見範圍與任務評論串相同。",
+    "guidance_unavailable": "本次執行無法接收追加說明。",
+    "guidance_ended": "本次執行已結束。",
     "dialog_title": "AI 代理執行記錄",
     "status_running": "進行中",
     "status_completed": "已完成",

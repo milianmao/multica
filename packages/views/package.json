@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "exports": {
+    "./common/task-approval": "./common/task-approval/index.ts",
     "./navigation": "./navigation/index.ts",
     "./dev-toolbar": "./dev-toolbar/index.ts",
     "./common/actor-avatar": "./common/actor-avatar.tsx",

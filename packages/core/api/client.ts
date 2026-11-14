@@ -1,4 +1,7 @@
+import type { TaskApproval, TaskApprovalDecision } from "../task-approvals/types";
+import { TaskApprovalListSchema, TaskApprovalSchema } from "./schemas";
 import type { ZodType } from "zod";
+import type { ChatExecutionConfig } from "../types/chat";
 import { AgentRuntimeSchema, EMPTY_RUNTIME } from "../runtimes/schema";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
 import type { WorkspaceWakeupPage, WorkspaceWakeupFilters } from "../types/issue-wakeup";
@@ -859,6 +862,7 @@ function isReplayableBody(body: BodyInit | null | undefined): boolean {
   return false;
 }
 
+/** Platform-independent HTTP transport; Query hooks own server-state caching. */
 export class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
@@ -1840,6 +1844,29 @@ export class ApiClient {
         ...(steerTaskIds?.length ? { steer_task_ids: steerTaskIds } : {}),
       }),
     });
+  }
+
+  /**
+   * Append text to one exact task with an idempotent request UUID.
+   * Only a validated comment with this task's receipt acknowledges the send.
+   */
+  async createTaskSupplement(
+    issueId: string,
+    taskId: string,
+    content: string,
+    clientRequestId: string,
+  ): Promise<Comment> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/tasks/${taskId}/supplements`, {
+      method: "POST",
+      body: JSON.stringify({ content, client_request_id: clientRequestId }),
+    });
+    const comment = parseWithFallback(raw, CommentSchema, EMPTY_COMMENT, {
+      endpoint: "POST /api/issues/{issueId}/tasks/{taskId}/supplements",
+    });
+    if (!comment.id || !comment.supplements?.some(receipt => receipt.task_id === taskId)) {
+      throw new Error("Target run did not acknowledge the additional message");
+    }
+    return comment;
   }
 
   async previewCommentTriggers(issueId: string, content: string, parentId?: string, editingCommentId?: string): Promise<CommentTriggerPreview> {
@@ -3028,6 +3055,36 @@ export class ApiClient {
     return this.fetch(`/api/issues/${issueId}/active-task`);
   }
 
+  // Native task approvals
+  /** Fetch native requests in the caller's workspace; malformed data stays a visible query failure. */
+  async listTaskApprovals(taskId: string, workspace?: WorkspaceScope, signal?: AbortSignal): Promise<TaskApproval[]> {
+    const raw = await this.fetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/approvals`, {
+      headers: workspaceHeader(workspace), signal,
+    });
+    const approvals = parseWithFallback<TaskApproval[] | null>(raw, TaskApprovalListSchema, null, {
+      endpoint: "GET /api/tasks/:id/approvals",
+    });
+    if (approvals === null) throw new Error("Invalid task approvals response.");
+    return approvals;
+  }
+
+  /** Send the current row's exact execution fence unchanged; only a persisted decision confirms a one-request grant. */
+  async decideTaskApproval(
+    taskId: string, currentApproval: TaskApproval, decision: TaskApprovalDecision, workspace?: WorkspaceScope,
+  ): Promise<TaskApproval> {
+    const { id: approvalId, runtime_id, dispatched_at, execution_id } = currentApproval;
+    const raw = await this.fetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/approvals/${encodeURIComponent(approvalId)}/decision`, {
+      method: "POST", body: JSON.stringify({ runtime_id, dispatched_at, execution_id, decision }), headers: workspaceHeader(workspace),
+    });
+    const approval = parseWithFallback<TaskApproval | null>(raw, TaskApprovalSchema, null, {
+      endpoint: "POST /api/tasks/:id/approvals/:approvalId/decision",
+    });
+    if (!approval || approval.id !== approvalId || approval.task_id !== taskId || approval.decision !== decision || approval.status === "pending") {
+      throw new Error("Invalid task approval decision response.");
+    }
+    return approval;
+  }
+
   async listTaskMessages(taskId: string): Promise<TaskMessagePayload[]> {
     const raw = await this.fetch<unknown>(`/api/tasks/${taskId}/messages`);
     return parseWithFallback<TaskMessagePayload[]>(raw, TaskMessageListSchema, [], {
@@ -4055,18 +4112,23 @@ export class ApiClient {
     });
   }
 
+  /** Creates a session with optional local overrides; omission preserves legacy defaults. */
   async createChatSession(
     data: {
       agent_id: string;
       title?: string;
       project_id?: string | null;
+      execution_config?: ChatExecutionConfig;
     },
     workspaceSlug?: string,
   ): Promise<ChatSession> {
-    return this.fetch("/api/chat/sessions", {
+    const raw: unknown = await this.fetch("/api/chat/sessions", {
       method: "POST",
       headers: workspaceHeader(workspaceSlug),
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChatSessionSchema, EMPTY_CHAT_SESSION, {
+      endpoint: "POST /api/chat/sessions",
     });
   }
 
@@ -4094,13 +4156,17 @@ export class ApiClient {
     });
   }
 
+  /** Patches supplied fields only; null execution options restore agent inheritance. */
   async updateChatSession(
     id: string,
-    data: { title: string } | { project_id: string | null },
+    data: { title: string } | { project_id: string | null } | { execution_config: ChatExecutionConfig | null },
   ): Promise<ChatSession> {
-    return this.fetch(`/api/chat/sessions/${id}`, {
+    const raw: unknown = await this.fetch(`/api/chat/sessions/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChatSessionSchema, EMPTY_CHAT_SESSION, {
+      endpoint: "PATCH /api/chat/sessions/:id",
     });
   }
 

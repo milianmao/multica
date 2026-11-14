@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import type { StorageAdapter } from "../types";
 import type { Attachment } from "../types/attachment";
+import type { ChatExecutionConfig } from "../types/chat";
+import { ChatExecutionConfigSchema } from "../api/schemas";
 import { getCurrentSlug, registerForWorkspaceRehydration } from "../platform/workspace-storage";
 import { registerDraftCleanup } from "../drafts/cleanup-registry";
 import {
@@ -18,6 +20,7 @@ const PROJECT_STORAGE_KEY = "multica:chat:selectedProjectId";
 const SESSION_STORAGE_KEY = "multica:chat:activeSessionId";
 /** Drafts are stored as one JSON blob per workspace: { [sessionId]: text }. */
 const DRAFTS_KEY = "multica:chat:drafts";
+const EXECUTION_CONFIG_DRAFTS_KEY = "multica:chat:execution-config-drafts";
 /** Draft attachment records per workspace: { [sessionId]: Attachment[] }. */
 const DRAFT_ATTACHMENTS_KEY = "multica:chat:draft-attachments";
 /**
@@ -131,6 +134,24 @@ function readDrafts(storage: StorageAdapter, key: string): Record<string, string
   try {
     const parsed = JSON.parse(raw);
     return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Restore only recognized runtime fields; corrupt entries cannot overwrite another draft. */
+function readDraftExecutionConfigs(storage: StorageAdapter, key: string): Record<string, ChatExecutionConfig> {
+  const raw = storage.getItem(key);
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const drafts: Record<string, ChatExecutionConfig> = {};
+    for (const [agentId, config] of Object.entries(parsed)) {
+      const result = ChatExecutionConfigSchema.safeParse(config);
+      if (result.success) drafts[agentId] = result.data;
+    }
+    return drafts;
   } catch {
     return {};
   }
@@ -350,6 +371,7 @@ export interface PendingSendRestore {
   sessionId: string;
 }
 
+/** Client-owned chat layout and unsent drafts; session execution data belongs to Query. */
 export interface ChatState {
   isOpen: boolean;
   /** Settings preference: is the floating chat window available at all. */
@@ -359,6 +381,8 @@ export interface ChatState {
   /** Project context for the next session. Existing sessions remain bound to
    *  their server-persisted project_id. */
   selectedProjectId: string | null;
+  /** Unsent configuration by agent; server session settings belong only to Query. */
+  draftExecutionConfigs: Record<string, ChatExecutionConfig>;
   /** Settings preference: the agent Ask Multica starts a new chat with. */
   quickChatAgentId: string | null;
   /** Bumped by `startNewChat`; the window focuses its composer on each bump. */
@@ -386,6 +410,9 @@ export interface ChatState {
   setActiveSession: (id: string | null) => void;
   setSelectedAgentId: (id: string) => void;
   setSelectedProjectId: (id: string | null) => void;
+  setDraftExecutionConfig: (agentId: string, config: ChatExecutionConfig) => void;
+  /** Clear only the accepted snapshot, retaining edits made while a send was pending. */
+  clearDraftExecutionConfig: (agentId: string, expected: ChatExecutionConfig | undefined) => void;
   setQuickChatAgentId: (id: string | null) => void;
   /** Ask Multica: open the window on a new chat with the quick-chat agent and no project. */
   startNewChat: () => void;
@@ -426,6 +453,10 @@ export interface ChatStoreOptions {
   storage: StorageAdapter;
 }
 
+/**
+ * Hydrates workspace-keyed client state through StorageAdapter and preserves newer
+ * execution drafts when an earlier send commits its captured snapshot.
+ */
 export function createChatStore(options: ChatStoreOptions) {
   const { storage } = options;
 
@@ -461,6 +492,7 @@ export function createChatStore(options: ChatStoreOptions) {
     activeSessionId: storage.getItem(wsKey(SESSION_STORAGE_KEY)),
     selectedAgentId: initialAgentId,
     selectedProjectId: storage.getItem(wsKey(PROJECT_STORAGE_KEY)),
+    draftExecutionConfigs: readDraftExecutionConfigs(storage, wsKey(EXECUTION_CONFIG_DRAFTS_KEY)),
     quickChatAgentId: storage.getItem(wsKey(QUICK_CHAT_AGENT_KEY)),
     newChatRequest: 0,
     chatBarKept: initialChatBar.kept,
@@ -472,6 +504,19 @@ export function createChatStore(options: ChatStoreOptions) {
     chatWidth: Number(storage.getItem(CHAT_WIDTH_KEY)) || CHAT_DEFAULT_W,
     chatHeight: Number(storage.getItem(CHAT_HEIGHT_KEY)) || CHAT_DEFAULT_H,
     isExpanded: storage.getItem(wsKey(CHAT_EXPANDED_KEY)) === "true",
+    setDraftExecutionConfig: (agentId, config) => {
+      const next = { ...get().draftExecutionConfigs, [agentId]: { ...config } };
+      storage.setItem(wsKey(EXECUTION_CONFIG_DRAFTS_KEY), JSON.stringify(next));
+      set({ draftExecutionConfigs: next });
+    },
+    clearDraftExecutionConfig: (agentId, expected) => {
+      if (get().draftExecutionConfigs[agentId] !== expected) return;
+      const next = { ...get().draftExecutionConfigs };
+      delete next[agentId];
+      if (Object.keys(next).length) storage.setItem(wsKey(EXECUTION_CONFIG_DRAFTS_KEY), JSON.stringify(next));
+      else storage.removeItem(wsKey(EXECUTION_CONFIG_DRAFTS_KEY));
+      set({ draftExecutionConfigs: next });
+    },
     setOpen: (open) => {
       logger.debug("setOpen", { from: get().isOpen, to: open });
       storage.setItem(OPEN_KEY, String(open));
@@ -737,6 +782,11 @@ export function createChatStore(options: ChatStoreOptions) {
   // each entry resets only its own in-memory slice. The server-less restore
   // queue is registered too so its recoverable text does not outlive the user.
   registerDraftCleanup({
+    storageKey: EXECUTION_CONFIG_DRAFTS_KEY,
+    workspaceScoped: true,
+    resetInMemory: () => store.setState({ draftExecutionConfigs: {} }),
+  });
+  registerDraftCleanup({
     storageKey: DRAFTS_KEY,
     workspaceScoped: true,
     resetInMemory: () => store.setState({ inputDrafts: {} }),
@@ -785,6 +835,7 @@ export function createChatStore(options: ChatStoreOptions) {
       activeSessionId: nextSession,
       selectedAgentId: nextAgent,
       selectedProjectId: nextProject,
+      draftExecutionConfigs: readDraftExecutionConfigs(storage, wsKey(EXECUTION_CONFIG_DRAFTS_KEY)),
       quickChatAgentId: storage.getItem(wsKey(QUICK_CHAT_AGENT_KEY)),
       chatBarKept: nextChatBar.kept,
       chatBarDismissed: nextChatBar.dismissed,

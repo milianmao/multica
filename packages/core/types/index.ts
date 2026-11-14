@@ -178,6 +178,10 @@ export {
   stripChannelMediaMarkers,
 } from "./attachment-url";
 export type {
+  ChatExecutionConfig,
+  ChatExecutionConfigCapabilities,
+  ChatExecutionConfigSupport,
+  ChatEffectiveExecutionConfig,
   ChatSession,
   ChatLastMessage,
   ChatPinnedAgent,

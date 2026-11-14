@@ -37,13 +37,15 @@ vi.mock("./agent-transcript-dialog", () => ({
     open,
     onOpenChange,
     items,
+    parentId,
   }: {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     items: TimelineItem[];
+    parentId?: string;
   }) =>
     open ? (
-      <div role="dialog" data-testid="transcript-dialog">
+      <div role="dialog" data-testid="transcript-dialog" data-parent-id={parentId}>
         <button type="button" onClick={() => onOpenChange(false)}>
           Close
         </button>
@@ -111,11 +113,13 @@ describe("TranscriptButton", () => {
         task={{ ...baseTask, status: "completed" }}
         agentName="Codex"
         items={items}
+        parentId="thread-input"
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "View transcript" }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveAttribute("data-parent-id", "thread-input");
 
     act(() => {
       window.dispatchEvent(
@@ -135,12 +139,13 @@ describe("TranscriptButton", () => {
     qc.setQueryData(chatKeys.taskMessages(LIVE_TASK_ID), [msg(1, "Bash")]);
     listTaskMessages.mockResolvedValue([msg(1, "Bash")]);
 
-    renderWith(qc, <TranscriptButton task={baseTask} agentName="Codex" isLive />);
+    renderWith(qc, <TranscriptButton task={baseTask} agentName="Codex" isLive parentId="thread-input" />);
 
     fireEvent.click(screen.getByRole("button", { name: "View transcript" }));
     await waitFor(() =>
       expect(screen.getAllByTestId("event")).toHaveLength(1),
     );
+    expect(screen.getByRole("dialog")).toHaveAttribute("data-parent-id", "thread-input");
 
     // Simulate a WS `task:message` append into the shared cache.
     act(() => {
@@ -181,6 +186,7 @@ describe("TranscriptButton", () => {
       <TranscriptButton
         task={{ ...baseTask, status: "completed", completed_at: "2026-05-15T10:00:10.000Z" }}
         agentName="Codex"
+        parentId="thread-input"
       />,
     );
 
@@ -188,6 +194,7 @@ describe("TranscriptButton", () => {
     await waitFor(() =>
       expect(screen.getAllByTestId("event")).toHaveLength(1),
     );
+    expect(screen.getByRole("dialog")).toHaveAttribute("data-parent-id", "thread-input");
 
     // A later cache write must NOT reach the terminal dialog: it renders a
     // one-shot local snapshot, never an observer of the shared cache.

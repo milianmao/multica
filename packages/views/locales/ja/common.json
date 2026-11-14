@@ -135,5 +135,37 @@
   },
   "navigation": {
     "open_in_new_tab": "新しいタブで開く"
+  },
+  "task_approvals": {
+    "title": "ネイティブ承認",
+    "kind": {
+      "command": "コマンド",
+      "file_change": "ファイル変更",
+      "permissions": "権限",
+      "unsupported": "未対応のリクエスト"
+    },
+    "status": {
+      "pending": "人による承認待ち",
+      "decided": "決定済み · 実行の再開待ち",
+      "processed": "処理済み",
+      "expired": "失効"
+    },
+    "decision": {
+      "approve": "今回のみ承認済み",
+      "deny": "拒否済み"
+    },
+    "approve": "今回のみ承認",
+    "deny": "拒否",
+    "submitting": "決定を送信中…",
+    "read_only": "権限のあるユーザーのみが決定できます。",
+    "command": "コマンド",
+    "cwd": "作業ディレクトリ",
+    "changes": "ファイル変更",
+    "permissions": "権限の範囲",
+    "details": "リクエストの詳細",
+    "load_failed": "承認リクエストを読み込めませんでした。",
+    "decision_failed": "決定を送信できませんでした。",
+    "unavailable": "この実行ではネイティブ承認を利用できません。",
+    "retry": "再試行"
   }
 }

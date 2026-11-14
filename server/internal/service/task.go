@@ -1970,6 +1970,27 @@ func (s *TaskService) PrepareChatTaskEnqueue(
 	}, nil
 }
 
+// chatExecutionConfigSnapshot runs only after send or enqueue owns the session and
+// agent locks. Inherited legacy settings stay untouched; overrides are checked
+// against the newly locked carrier's provider before the task is persisted.
+func chatExecutionConfigSnapshot(ctx context.Context, q *db.Queries, session db.ChatSession, carrier db.Agent) ([]byte, error) {
+	inherited := ExecutionConfig{Model: carrier.Model.String, ThinkingLevel: carrier.ThinkingLevel.String, ServiceTier: carrier.ServiceTier.String}
+	config, err := decodeChatExecutionConfig(session.ExecutionConfig)
+	if err != nil {
+		return nil, err
+	}
+	if config.Model != nil || config.ThinkingLevel != nil || config.ServiceTier != nil || config.ApprovalPolicy != nil {
+		runtime, err := q.GetAgentRuntime(ctx, carrier.RuntimeID)
+		if err != nil {
+			return nil, fmt.Errorf("load chat execution runtime: %w", err)
+		}
+		if err := validateChatExecutionConfig(config, inherited, runtime.Provider); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(config.resolve(inherited))
+}
+
 // EnqueueChatTask creates a Direct Chat task. If the Chat also has a channel
 // binding, its context generation is still snapshotted, but no external delivery
 // snapshot is created: first-party sends reply only to first-party clients.
@@ -2063,6 +2084,8 @@ func (s *TaskService) EnqueuePreparedChannelChatTaskInTx(
 	)
 }
 
+// enqueueChatTaskTx locks the session to freeze execution options with queue acceptance,
+// preventing later session or agent edits from changing already accepted turns.
 func (s *TaskService) enqueueChatTaskTx(
 	ctx context.Context,
 	qtx *db.Queries,
@@ -2092,6 +2115,10 @@ func (s *TaskService) enqueueChatTaskTx(
 	}
 	if !agent.RuntimeID.Valid {
 		return db.AgentTaskQueue{}, ErrChatTaskAgentNoRuntime
+	}
+	executionConfig, err := chatExecutionConfigSnapshot(ctx, qtx, currentSession, agent)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("snapshot chat execution config: %w", err)
 	}
 
 	binding, bindingErr := qtx.LockChannelChatSessionBindingForContext(ctx, chatSession.ID)
@@ -2184,6 +2211,12 @@ func (s *TaskService) enqueueChatTaskTx(
 	task, err = qtx.SetChatTaskInputOwnerSelf(ctx, task.ID)
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("set channel chat task input owner: %w", err)
+	}
+	task, err = qtx.SetChatTaskExecutionConfig(ctx, db.SetChatTaskExecutionConfigParams{
+		ID: task.ID, ChatSessionID: currentSession.ID, ExecutionConfig: executionConfig,
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("persist chat execution snapshot: %w", err)
 	}
 	if err := qtx.LinkUnownedChannelChatMessagesToTask(
 		ctx, db.LinkUnownedChannelChatMessagesToTaskParams{
@@ -2479,6 +2512,10 @@ func (s *TaskService) sendDirectChatMessage(
 		if !carrier.RuntimeID.Valid {
 			return ErrChatTaskAgentNoRuntime
 		}
+		executionConfig, err := chatExecutionConfigSnapshot(ctx, qtx, currentSession, carrier)
+		if err != nil {
+			return fmt.Errorf("snapshot chat execution config: %w", err)
+		}
 
 		// The database status of every newly-created task is "queued" until a
 		// daemon claims it. Product queue semantics are positional instead: this
@@ -2516,6 +2553,12 @@ func (s *TaskService) sendDirectChatMessage(
 		task, err = qtx.SetChatTaskInputOwnerSelf(ctx, task.ID)
 		if err != nil {
 			return fmt.Errorf("stamp direct chat input owner: %w", err)
+		}
+		task, err = qtx.SetChatTaskExecutionConfig(ctx, db.SetChatTaskExecutionConfigParams{
+			ID: task.ID, ChatSessionID: currentSession.ID, ExecutionConfig: executionConfig,
+		})
+		if err != nil {
+			return fmt.Errorf("persist chat execution snapshot: %w", err)
 		}
 		out.Task = task
 
@@ -6505,6 +6548,9 @@ func SettleTerminalTaskState(ctx context.Context, q *db.Queries, tasks ...db.Age
 	taskIDs := make([]pgtype.UUID, 0, len(tasks))
 	for _, task := range tasks {
 		taskIDs = append(taskIDs, task.ID)
+	}
+	if err := q.ExpireTaskApprovalsByTaskIDs(ctx, taskIDs); err != nil {
+		return fmt.Errorf("expire terminal native task approvals: %w", err)
 	}
 	if _, err := q.SettleTerminalTaskSupplements(ctx, taskIDs); err != nil {
 		return fmt.Errorf("settle terminal task supplements: %w", err)

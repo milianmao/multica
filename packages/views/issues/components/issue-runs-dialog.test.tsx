@@ -13,8 +13,8 @@ vi.mock("../../common/actor-avatar", () => ({
 }));
 
 vi.mock("../../common/task-transcript", () => ({
-  TranscriptButton: ({ title }: { title?: string }) => (
-    <button type="button">{title ?? "Transcript"}</button>
+  TranscriptButton: ({ title, parentId }: { title?: string; parentId?: string }) => (
+    <button type="button" data-parent-id={parentId}>{title ?? "Transcript"}</button>
   ),
 }));
 
@@ -153,6 +153,7 @@ describe("IssueRunsDialog", () => {
     ]);
 
     expect(screen.getByText("“@Lambda fix conflicts & ci”")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View transcript" })).toHaveAttribute("data-parent-id", "comment-1");
   });
 
   it("shows no figure — not $0 — for a run without usage", () => {

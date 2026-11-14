@@ -23,6 +23,25 @@
     "all_chats": "すべてのチャット",
     "more_other": "他 {{count}} 件のチャット"
   },
+  "execution_config": {
+    "label": "実行設定",
+    "inherit": "エージェントの設定を使用",
+    "model": "モデル",
+    "thinking": "推論の強度",
+    "approval": "権限",
+    "approval_inherit": "既存の動作を維持",
+    "approval_on_request": "必要に応じて確認",
+    "approval_full_access": "フルアクセス",
+    "unsupported": "このサーバーはチャットごとの実行設定の変更に対応していません。",
+    "model_unsupported": "このランタイムはモデルの上書きに対応していません。",
+    "thinking_unsupported": "このランタイムは推論の強度の上書きに対応していません。",
+    "thinking_unavailable": "現在のモデルでは推論の強度を選択できません。",
+    "catalog_unavailable": "ランタイムのモデル一覧を取得できません。",
+    "refresh_catalog": "モデル一覧を更新",
+    "approval_unsupported": "ネイティブ承認は現在 Codex のみで利用できます。",
+    "full_access_hint": "フルアクセスではサンドボックスの制限がなくなり、確認なしでコマンドの実行やファイルの変更ができます。",
+    "save_failed": "設定を保存できませんでした。以前の選択は保持されています。"
+  },
   "input": {
     "page_context_add": "このページをコンテキストに追加",
     "page_context_remove": "ページのコンテキストを削除",

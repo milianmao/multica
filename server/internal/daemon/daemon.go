@@ -8020,6 +8020,8 @@ func qualifyTaskModel(
 	return qualified
 }
 
+// runTask applies the enqueue-time execution snapshot to the claimed run and refuses
+// native approval unless both runtime and server support it; it never weakens the policy.
 func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (taskResult TaskResult, returnErr error) {
 	phaseRecorder := taskPhaseRecorderFromContext(ctx)
 	phaseRecorder.Mark(taskPhasePrepareStarted)
@@ -8029,6 +8031,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// reuse a workdir when the two identities disagree.
 	if err := validateTaskIdentity(task); err != nil {
 		return TaskResult{}, err
+	}
+	approvalPolicy := ""
+	if task.ExecutionConfig != nil {
+		approvalPolicy = task.ExecutionConfig.ApprovalPolicy
+	}
+	if approvalPolicy != "" && approvalPolicy != "on-request" && approvalPolicy != "full-access" {
+		return TaskResult{}, fmt.Errorf("unsupported execution approval policy %q", approvalPolicy)
+	}
+	if approvalPolicy == "on-request" && (provider != "codex" || !task.NativeApprovalSupported || task.DispatchedAt == "") {
+		return TaskResult{}, errors.New("on-request approval is unsupported by this runtime or server; full access was not enabled")
 	}
 
 	// Refuse to spawn an agent without a workspace. An empty workspace_id
@@ -8893,6 +8905,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		gateCodexResumeToRolloutPresence(&task, &taskCtx, provider, env.CodexHome, taskLog)
 	}
 
+	if provider == "codex" && approvalPolicy != "" {
+		if err := execenv.ApplyCodexApprovalPolicy(env.CodexHome, execenv.CodexHomeOptions{
+			ApprovalPolicy: approvalPolicy, CodexVersion: resolvedVersion, CodexCustomArgs: codexSandboxArgs,
+		}, taskLog); err != nil {
+			return TaskResult{}, fmt.Errorf("apply task-local Codex approval sandbox: %w", err)
+		}
+	}
+
 	// Build the runtime brief and inject it into the provider-specific
 	// instruction file when supported.
 	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
@@ -9130,6 +9150,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil && task.Agent.Model != "" {
 		model = task.Agent.Model
 	}
+	if task.ExecutionConfig != nil {
+		model = task.ExecutionConfig.Model
+	}
 	if model == "" {
 		model = entry.Model
 	}
@@ -9169,6 +9192,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		thinkingLevel = task.Agent.ThinkingLevel
 		serviceTier = task.Agent.ServiceTier
 	}
+	if task.ExecutionConfig != nil {
+		thinkingLevel = task.ExecutionConfig.ThinkingLevel
+		serviceTier = task.ExecutionConfig.ServiceTier
+	}
 	selection := resolveTaskModelSelection(ctx, provider, agent.NewCommand(entry.Path, profileFixedArgs),
 		taskModelSelection{Model: model, ThinkingLevel: thinkingLevel, ServiceTier: serviceTier}, taskLog)
 	model, thinkingLevel, serviceTier = selection.Model, selection.ThinkingLevel, selection.ServiceTier
@@ -9179,6 +9206,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 	execOpts := agent.ExecOptions{
 		EnableTaskSupplement:       taskSupplementNegotiated,
+		ApprovalPolicy:             approvalPolicy,
+		ExecutionConfigPresent:     task.ExecutionConfig != nil,
 		CursorHookCommand:          cursorHookCommand,
 		Cwd:                        env.WorkDir,
 		PiSkillPaths:               env.PiSkillPaths,
@@ -9217,6 +9246,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		OpenclawModelOverride:  openclawModelOverride,
 		ClaudeSettingsPath:     env.ClaudeSettingsPath,
 		QwenpawWorkspace:       env.QwenpawWorkspace,
+	}
+	if approvalPolicy == "on-request" {
+		execOpts.ApprovalHandler = newTaskApprovalHandler(d.client, task)
 	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:
@@ -10051,6 +10083,30 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	agentCtx, agentCancel := context.WithCancel(ctx)
 	defer agentCancel()
 
+	var approvalPending atomic.Int32
+	var lastActivityAt atomic.Int64
+	lastActivityAt.Store(int64(awakeclock.Now()))
+	if handler, ok := opts.ApprovalHandler.(*taskApprovalHandler); ok {
+		execution := handler.forExecution()
+		opts.ApprovalHandler = execution
+		defer func() {
+			agentCancel()
+			// Registration can commit before its response is lost; expire the execution, not only locally known records.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := execution.expire(cleanupCtx); err != nil {
+				taskLog.Warn("expire native approvals after process exit", "error", err)
+			}
+		}()
+	}
+	onApprovalPending := opts.OnApprovalPending
+	opts.OnApprovalPending = func(delta int) {
+		approvalPending.Add(int32(delta))
+		lastActivityAt.Store(int64(awakeclock.Now()))
+		if onApprovalPending != nil {
+			onApprovalPending(delta)
+		}
+	}
 	session, err := backend.Execute(agentCtx, prompt, opts)
 	if err != nil {
 		// One provider-agnostic boundary for launches: every backend's
@@ -10112,8 +10168,6 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	// charged to the agent as silence (GitHub #9024).
 	// Initialise to the start so a backend that never emits a single
 	// message also trips the watchdog.
-	var lastActivityAt atomic.Int64
-	lastActivityAt.Store(int64(awakeclock.Now()))
 	// inFlightTools counts tool_use messages that haven't yet been paired
 	// with a matching tool_result. A non-zero count means the agent is
 	// legitimately waiting on a tool (e.g. `npm install`, `docker build`)
@@ -10146,6 +10200,14 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 			}
 			return count
 		}
+	}
+	nativeToolCount := watchdogToolCount
+	watchdogToolCount = func() int32 {
+		if approvalPending.Load() > 0 {
+			lastActivityAt.Store(int64(awakeclock.Now()))
+			return 0
+		}
+		return nativeToolCount()
 	}
 	// A backend that can prove its outcome is already decided outranks every
 	// liveness policy below: a run whose terminal result has been read is not a

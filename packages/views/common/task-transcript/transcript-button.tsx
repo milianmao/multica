@@ -33,6 +33,8 @@ interface TranscriptButtonProps {
    */
   items?: TimelineItem[];
   isLive?: boolean;
+  /** Preserve the host's visible comment thread for run-scoped guidance. */
+  parentId?: string;
   className?: string;
   title?: string;
   renderButton?: boolean;
@@ -76,6 +78,7 @@ export function TranscriptButton({
   agentName,
   items: providedItems,
   isLive = false,
+  parentId,
   className,
   title = "View transcript",
   renderButton = true,
@@ -202,6 +205,7 @@ export function TranscriptButton({
             task={task}
             agentName={agentName}
             isLive={isLive}
+            parentId={parentId}
             onOpenChange={setOpen}
             finalFocus={returnFocus}
             headerSlot={headerSlot}
@@ -214,6 +218,7 @@ export function TranscriptButton({
             items={items}
             agentName={agentName}
             isLive={isLive}
+            parentId={parentId}
             finalFocus={returnFocus}
             headerSlot={headerSlot}
           />
@@ -226,6 +231,7 @@ interface LiveTranscriptDialogProps {
   task: AgentTask;
   agentName: string;
   isLive: boolean;
+  parentId?: string;
   onOpenChange: (open: boolean) => void;
   finalFocus: boolean;
   headerSlot?: React.ReactNode;
@@ -246,6 +252,7 @@ function LiveTranscriptDialog({
   task,
   agentName,
   isLive,
+  parentId,
   onOpenChange,
   finalFocus,
   headerSlot,
@@ -292,6 +299,7 @@ function LiveTranscriptDialog({
       items={items}
       agentName={agentName}
       isLive={isLive}
+      parentId={parentId}
       finalFocus={finalFocus}
       headerSlot={headerSlot}
     />

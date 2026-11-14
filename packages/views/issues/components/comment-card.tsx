@@ -59,7 +59,7 @@ import { useT } from "../../i18n";
 import { CommentsFoldBar } from "./resolved-thread-bar";
 import { deriveThreadResolution } from "./thread-utils";
 import { RevisionConflictCompare } from "./revision-conflict-compare";
-import { InlineCommentRun, PlacedInlineCommentRun, useInlineCommentRunState, type InlineCommentRunState } from "./inline-comment-run";
+import { InlineCommentRun, PlacedInlineCommentRun, useInlineCommentRunState, type InlineCommentRunState, type InlineCommentRunTranscriptControl } from "./inline-comment-run";
 import { EMPTY_COMMENT_RUNS, isRunFailureNotice, orderThreadWithRuns, type CommentRun, type ThreadRunSlot } from "./comment-runs";
 import { descriptionPreview } from "./description-preview";
 import { useCommentAnnotations } from "./use-comment-annotations";
@@ -119,6 +119,8 @@ interface CommentCardProps {
   replyScrollParent?: HTMLElement | null;
   runs?: CommentRun[];
   runViewState?: InlineCommentRunState;
+  /** Keeps nested and header log triggers attached to the stable issue host. */
+  transcriptControl?: InlineCommentRunTranscriptControl;
   enteringRunIds?: ReadonlySet<string>;
   entry: TimelineEntry;
   /**
@@ -1066,12 +1068,14 @@ function ReplyToQuote({ entry, onJump }: { entry: TimelineEntry; onJump?: (comme
 }
 
 /** A run without a persisted reply still belongs to the agent, never its trigger author. */
-export function AgentRunComment({ run, standalone = false, commentProps, entering = false, replyTo, highlightedId, managedAnchor = false }: {
+export function AgentRunComment({ run, standalone = false, commentProps, transcriptControl, entering = false, replyTo, highlightedId, managedAnchor = false }: {
   run: CommentRun;
   managedAnchor?: boolean;
   standalone?: boolean;
   entering?: boolean;
   commentProps?: CommentCardProps;
+  /** Run slots can move between roots and threads without taking the dialog with them. */
+  transcriptControl?: InlineCommentRunTranscriptControl;
   /** The input this run answers, shown when the thread no longer places the two together. */
   replyTo?: ReactNode;
   /** The flashed jump target: the slot's comment id, or the run's task id until it has one. */
@@ -1102,16 +1106,16 @@ export function AgentRunComment({ run, standalone = false, commentProps, enterin
       className={cn("transition-colors duration-700", standalone ? !reply && "rounded-xl border" : "border-t border-border/50", !reply && "py-1.5",
         highlighted ? highlightedCommentBackgroundClass : standalone && !reply && "bg-card")}>
       {commentProps && reply ? standalone ? (
-        <CommentCard {...commentProps} runs={commentProps.runs ?? [run]} runViewState={viewState} />
+        <CommentCard {...commentProps} runs={commentProps.runs ?? [run]} runViewState={viewState} transcriptControl={transcriptControl} />
       ) : (
         <CommentRow {...commentProps}
           isHighlighted={commentProps.highlightedCommentId === reply?.id}
           isResolution={!!reply?.resolved_at}
           replyTo={replyTo}
-          runHeader={<PlacedInlineCommentRun run={run} viewState={viewState} presentation="header" />}
-          runMetadata={<PlacedInlineCommentRun run={run} viewState={viewState} />} />
+          runHeader={<PlacedInlineCommentRun run={run} viewState={viewState} transcriptControl={transcriptControl} presentation="header" />}
+          runMetadata={<PlacedInlineCommentRun run={run} viewState={viewState} transcriptControl={transcriptControl} />} />
       ) : <div className="px-4 max-md:px-3">
-        <InlineCommentRun run={run} viewState={viewState} showIdentity replyTo={replyTo} replacesFailureNotice={!!notice} />
+        <InlineCommentRun run={run} viewState={viewState} transcriptControl={transcriptControl} showIdentity replyTo={replyTo} replacesFailureNotice={!!notice} />
       </div>}
     </div>
   );
@@ -1131,6 +1135,7 @@ function CommentCardImpl({
   replyScrollParent,
   runs = EMPTY_COMMENT_RUNS,
   runViewState,
+  transcriptControl,
   enteringRunIds,
   entry,
   replies,
@@ -1246,13 +1251,13 @@ function CommentCardImpl({
   const renderRuns = (commentId: string, presentation: "inline" | "header" = "inline") => runs.filter((run) => run.commentId === commentId && run.hasReply
     && (!run.anchorCommentId || run.anchorCommentId === commentId || replyFolded))
     .map((run) => <PlacedInlineCommentRun key={run.task.id} run={run} presentation={presentation}
-      viewState={run.commentId === entry.id ? runViewState : undefined} replacesFailureNotice={run === noticeRun} />);
+      transcriptControl={transcriptControl} viewState={run.commentId === entry.id ? runViewState : undefined} replacesFailureNotice={run === noticeRun} />);
 
   // A run slot renders the run's latest comment, or its activity until it
   // posts one.
   const renderThreadRow = (row: TimelineEntry | ThreadRunSlot, managedAnchor = false) => "run" in row ? (
     <AgentRunComment key={row.run.task.id} run={row.run} managedAnchor={managedAnchor} entering={enteringRunIds?.has(row.run.task.id)}
-      highlightedId={highlightedCommentId}
+      transcriptControl={transcriptControl} highlightedId={highlightedCommentId}
       replyTo={row.replyTo && <ReplyToQuote entry={row.replyTo} onJump={onJumpToComment} />}
       commentProps={row.reply ? {
         issueId, entry: row.reply, replies: [], currentUserId, canModerate, onReply, onEdit, onDelete,

@@ -19,6 +19,27 @@ WHERE id = $1;
 SELECT * FROM chat_session
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: UpdateChatSessionExecutionConfig :one
+-- The caller owns the session lock before validating and merging overrides.
+UPDATE chat_session
+SET execution_config = @execution_config::jsonb, updated_at = now()
+WHERE id = @id::uuid AND workspace_id = @workspace_id::uuid
+RETURNING *;
+
+-- name: ListChatExecutionConfigs :many
+-- Batch the effective settings for session response projections. Runtime
+-- pointers and provider settings come from the current shared agent, not the
+-- daemon-owned resume pointer on chat_session.
+SELECT cs.id, cs.execution_config, a.runtime_id,
+       COALESCE(a.model, '')::text AS model,
+       COALESCE(a.thinking_level, '')::text AS thinking_level,
+       COALESCE(a.service_tier, '')::text AS service_tier,
+       COALESCE(r.provider, '')::text AS provider
+FROM chat_session AS cs
+LEFT JOIN agent AS a ON a.id = cs.agent_id AND a.workspace_id = cs.workspace_id
+LEFT JOIN agent_runtime AS r ON r.id = a.runtime_id AND r.workspace_id = cs.workspace_id
+WHERE cs.workspace_id = @workspace_id::uuid AND cs.id = ANY(@ids::uuid[]);
+
 -- name: ListChatSessionCreators :many
 -- Owners of a page of chat tasks, so task lists can hide the content of chat
 -- tasks the viewer did not start.
@@ -1196,6 +1217,13 @@ RETURNING task.*;
 UPDATE agent_task_queue
 SET chat_input_task_id = id
 WHERE id = $1
+RETURNING *;
+
+-- name: SetChatTaskExecutionConfig :one
+-- Preserve other task context while freezing the send-time execution settings.
+UPDATE agent_task_queue
+SET context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('execution_config', @execution_config::jsonb)
+WHERE id = @id::uuid AND chat_session_id = @chat_session_id::uuid
 RETURNING *;
 
 -- name: GetLastChatTaskSession :one

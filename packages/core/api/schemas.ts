@@ -2498,12 +2498,51 @@ const ChatChannelSourceSchema = z.object({
   route_revision: z.number().default(0),
 }).loose();
 
+export const ChatExecutionConfigSchema = z.object({
+  model: z.string().nullable().optional().catch(null),
+  thinking_level: z.string().nullable().optional().catch(null),
+  service_tier: z.string().nullable().optional().catch(null),
+  approval_policy: z.enum(["on-request", "full-access"]).nullable().optional().catch(null),
+});
+
+export const ChatExecutionConfigCapabilitiesSchema = z.object({
+  model: z.boolean().catch(false),
+  thinking_level: z.boolean().catch(false),
+  service_tier: z.boolean().catch(false),
+  approval_policy: z.boolean().catch(false),
+});
+
+export const ChatEffectiveExecutionConfigSchema = z.object({
+  model: z.string().catch(""),
+  thinking_level: z.string().catch(""),
+  service_tier: z.string().catch(""),
+  approval_policy: z.enum(["on-request", "full-access", ""]).catch(""),
+});
+
+export const ChatSessionUpdatedPayloadSchema = z.object({
+  chat_session_id: z.string(),
+  workspace_id: z.string().optional(),
+  title: z.string().optional(),
+  project_id: z.string().nullable().optional(),
+  pinned: z.boolean().optional(),
+  status: z.enum(["active", "archived"]).optional(),
+  updated_at: z.string().optional(),
+  execution_config: ChatExecutionConfigSchema.nullable().optional(),
+  effective_execution_config: ChatEffectiveExecutionConfigSchema.optional(),
+  execution_config_supported: z.boolean().optional(),
+  execution_config_capabilities: ChatExecutionConfigCapabilitiesSchema.optional(),
+}).loose();
+
 export const ChatSessionSchema: z.ZodType<ChatSession> = z.object({
   id: z.string(),
   workspace_id: z.string().default(""),
   agent_id: z.string().default(""),
   creator_id: z.string().default(""),
   project_id: z.string().nullable().optional(),
+  execution_config: ChatExecutionConfigSchema.optional().catch(undefined),
+  effective_execution_config: ChatEffectiveExecutionConfigSchema.optional().catch(undefined),
+  execution_config_supported: z.boolean().catch(false),
+  execution_config_capabilities: ChatExecutionConfigCapabilitiesSchema.optional().catch(undefined),
   title: z.string().default(""),
   status: z.enum(["active", "archived"]).catch("active"),
   has_unread: z.boolean().default(false),
@@ -4558,3 +4597,28 @@ export const WorkspaceListItemSchema = z.object({
 export const WorkspacePinnedSchema = z.object({
   pinned_at: z.iso.datetime({ offset: true }).nullable().catch(null),
 });
+
+// Native task approvals: unknown enums or missing execution fences never create an actionable request.
+export const TaskApprovalSchema = z.object({
+  id: z.string().min(1),
+  task_id: z.string().min(1),
+  runtime_id: z.string().min(1).catch("").default(""),
+  dispatched_at: z.string().min(1).catch("").default(""),
+  execution_id: z.string().min(1).catch("").default(""),
+  native_request_id: z.string().default(""),
+  kind: z.enum(["command", "file_change", "permissions", "unsupported"]).catch("unsupported"),
+  method: z.string().default(""),
+  params: z.record(z.string(), z.unknown()).default({}),
+  status: z.enum(["pending", "decided", "processed", "expired"]).catch("expired"),
+  decision: z.enum(["approve", "deny"]).nullable().catch(null).default(null),
+  created_at: z.string().default(""),
+  decided_at: z.string().nullable().catch(null).default(null),
+  processed_at: z.string().nullable().catch(null).default(null),
+  can_decide: z.boolean().catch(false).default(false),
+}).transform((approval) => ({
+  ...approval,
+  can_decide: approval.can_decide && approval.kind !== "unsupported" && approval.status === "pending" &&
+    approval.decision === null && !!approval.runtime_id && !!approval.dispatched_at && !!approval.execution_id,
+}));
+
+export const TaskApprovalListSchema = z.array(TaskApprovalSchema);

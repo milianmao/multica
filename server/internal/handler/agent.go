@@ -401,9 +401,12 @@ type AgentTaskResponse struct {
 	// cannot see (MUL-8472): only identity, status, timing and usage remain.
 	Restricted bool `json:"restricted,omitempty"`
 
-	StartClaimSupported      bool                   `json:"start_claim_supported,omitempty"`
-	CancelledByCommentChange bool                   `json:"cancelled_by_comment_change,omitempty"`
-	CancelledBy              *TaskCancellationActor `json:"cancelled_by,omitempty"`
+	StartClaimSupported bool `json:"start_claim_supported,omitempty"`
+	// ExecutionConfig is an immutable send-time override only on daemon claims.
+	ExecutionConfig          *service.ExecutionConfig `json:"execution_config,omitempty"`
+	NativeApprovalSupported  bool                     `json:"native_approval_supported,omitempty"`
+	CancelledByCommentChange bool                     `json:"cancelled_by_comment_change,omitempty"`
+	CancelledBy              *TaskCancellationActor   `json:"cancelled_by,omitempty"`
 
 	ID                   string                 `json:"id"`
 	AgentID              string                 `json:"agent_id"`

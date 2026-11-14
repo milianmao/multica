@@ -135,5 +135,37 @@
   },
   "navigation": {
     "open_in_new_tab": "在新標籤頁開啟"
+  },
+  "task_approvals": {
+    "title": "原生審批",
+    "kind": {
+      "command": "命令",
+      "file_change": "檔案變更",
+      "permissions": "權限",
+      "unsupported": "不支援的請求"
+    },
+    "status": {
+      "pending": "等待人工審批",
+      "decided": "已決定，等待執行繼續",
+      "processed": "已處理",
+      "expired": "已失效"
+    },
+    "decision": {
+      "approve": "已單次批准",
+      "deny": "已拒絕"
+    },
+    "approve": "單次批准",
+    "deny": "拒絕",
+    "submitting": "正在提交決定…",
+    "read_only": "僅獲授權的人員可以審批。",
+    "command": "命令",
+    "cwd": "工作目錄",
+    "changes": "檔案變更",
+    "permissions": "權限範圍",
+    "details": "請求詳情",
+    "load_failed": "審批載入失敗。",
+    "decision_failed": "決定提交失敗。",
+    "unavailable": "此任務的原生審批暫不可用。",
+    "retry": "重試"
   }
 }

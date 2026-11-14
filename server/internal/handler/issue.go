@@ -4666,6 +4666,8 @@ func (h *Handler) deleteIssueAndCollectAttachmentURLs(ctx context.Context, issue
 	return h.deleteIssuesAndCollectAttachmentURLs(ctx, []db.Issue{issue}, excludedIssueIDs)
 }
 
+// deleteIssuesAndCollectAttachmentURLs shares transactional cleanup between both delete entry points.
+// Detached child issues and their native approval history remain outside the deleted ownership scope.
 func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issues []db.Issue, excludedIssueIDs []pgtype.UUID) (issueDeleteResult, error) {
 	sort.Slice(issues, func(i, j int) bool {
 		return uuidToString(issues[i].ID) < uuidToString(issues[j].ID)
@@ -4744,6 +4746,11 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 		}
 		if err := qtx.DeleteIssue(ctx, db.DeleteIssueParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
 			return issueDeleteResult{}, fmt.Errorf("delete issue: %w", err)
+		}
+		if err := qtx.DeleteTaskApprovalsByIssue(ctx, db.DeleteTaskApprovalsByIssueParams{
+			IssueID: issue.ID, WorkspaceID: issue.WorkspaceID,
+		}); err != nil {
+			return issueDeleteResult{}, fmt.Errorf("delete native issue task approvals: %w", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

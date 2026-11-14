@@ -79,7 +79,7 @@ import { ActionShortcutKeycaps } from "../../common/shortcut-keycaps";
 import { PropRow } from "../../common/prop-row";
 import { TimelineHandoff } from "../../workflows/timeline-handoff";
 import { PropertyIcon } from "../../common/property-icon";
-import type { Attachment, Issue, IssueProperty, IssueStatus, IssueStatusCategory, IssuePriority, TimelineEntry, UpdateIssueRequest } from "@multica/core/types";
+import type { AgentTask, Attachment, Issue, IssueProperty, IssueStatus, IssueStatusCategory, IssuePriority, TimelineEntry, UpdateIssueRequest } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
 import { isBuiltInIssueStatus } from "@multica/core/issue-statuses";
 import { commentLandingTarget, isDeletedComment } from "@multica/core/issues/comment-deletion";
@@ -107,7 +107,11 @@ import { IssuePropertyPills } from "./issue-property-pills";
 import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
 import { useNewRunIds } from "./use-run-comment-motion";
 import { AgentRunComment, CommentCard } from "./comment-card";
-import { EMPTY_COMMENT_RUNS, buildCommentRunView, orderTimelineWithRuns, type CommentRun } from "./comment-runs";
+import { EMPTY_COMMENT_RUNS, buildCommentRunView, isActiveCommentRun, orderTimelineWithRuns, type CommentRun } from "./comment-runs";
+import type { InlineCommentRunTranscriptControl } from "./inline-comment-run";
+import { AgentTranscriptDialog } from "../../common/task-transcript/agent-transcript-dialog";
+import { buildTimeline } from "../../common/task-transcript/build-timeline";
+import { useTaskMessages } from "@multica/core/chat/queries";
 import { issueTasksOptions } from "@multica/core/issues/queries";
 import { SourceContextBadge } from "./source-context-viewer";
 import { RevisionConflictCompare } from "./revision-conflict-compare";
@@ -1473,6 +1477,35 @@ export function IssueDetailSkeleton({
   );
 }
 
+/** Stores only run identity and focus intent, never a frozen task or transcript. */
+interface IssueActivityTranscriptSelection {
+  issueId: string;
+  taskId: string;
+  fromKeyboard: boolean;
+}
+
+/** Keeps the transcript and composer mounted when the activity run changes placement. */
+function IssueActivityTranscriptDialog({ task, parentId, fromKeyboard, onOpenChange }: {
+  task: AgentTask;
+  parentId?: string;
+  fromKeyboard: boolean;
+  /** Closing clears the issue-owned selection rather than a disposable row's state. */
+  onOpenChange(open: boolean): void;
+}) {
+  const { t } = useT("issues");
+  const { getActorName } = useActorName();
+  const active = isActiveCommentRun(task);
+  const { data, isPending, isError, refetch } = useTaskMessages(task.id, active);
+  const items = useMemo(() => buildTimeline(data ?? []), [data]);
+  return <AgentTranscriptDialog open onOpenChange={onOpenChange}
+    task={task} items={items} agentName={getActorName("agent", task.agent_id)}
+    isLive={active} parentId={parentId} finalFocus={fromKeyboard}
+    contentState={isPending ? <p role="status" className="text-body text-muted-foreground">{t(($) => $.inline_run.loading)}</p>
+      : isError ? <div role="alert" className="text-body text-destructive">{t(($) => $.inline_run.load_failed)}
+        <button className="ml-2 underline" type="button" onClick={() => void refetch()}>{t(($) => $.inline_run.try_again)}</button>
+      </div> : undefined} />;
+}
+
 // IssueDetail
 
 export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = true, layoutId = ISSUE_DETAIL_LAYOUT_ID, highlightCommentId: linkedCommentId, highlightRequestToken: linkedRequestToken, highlightAppRequestId, leadingAction, variant = "page", trailingActions, readsInbox = true, skipInitialRefetch = false, openDeliverable, onDeliverableLinkDone }: IssueDetailProps) {
@@ -1482,6 +1515,27 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const locale = useLocale();
   const timeAgo = useTimeAgo();
   const id = issueId;
+  const [activityTranscript, setActivityTranscript] = useState<IssueActivityTranscriptSelection | null>(null);
+  const activeActivityTranscript = activityTranscript?.issueId === id ? activityTranscript : null;
+  /** Opening records identity once; timeline regrouping never closes or reopens the host. */
+  const openActivityTranscript = useCallback((taskId: string, fromKeyboard: boolean) => {
+    setActivityTranscript({ issueId: id, taskId, fromKeyboard });
+  }, [id]);
+  /** Task and timeline updates leave the selection intact until the dialog closes. */
+  const handleActivityTranscriptOpenChange = useCallback((open: boolean) => {
+    if (!open) setActivityTranscript(null);
+  }, []);
+  const transcriptControl = useMemo<InlineCommentRunTranscriptControl>(() => ({
+    taskId: activeActivityTranscript?.taskId ?? null,
+    onOpen: openActivityTranscript,
+  }), [activeActivityTranscript, openActivityTranscript]);
+  useEffect(() => {
+    setActivityTranscript(null);
+    /** Navigation can leave the issue mounted, but must dismiss its open transcript. */
+    const handleNavigate = () => setActivityTranscript(null);
+    window.addEventListener("multica:navigate", handleNavigate);
+    return () => window.removeEventListener("multica:navigate", handleNavigate);
+  }, [id]);
   const [deliverableJump, setDeliverableJump] = useState<{
     issueId: string;
     linkedCommentId: string | undefined;
@@ -1840,6 +1894,13 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     previousCommentRuns.current = next.runs;
     return next;
   }, [commentTasks, timeline]);
+  // Resolve current task metadata and thread placement independently of the opening row.
+  const activityTranscriptTask = activeActivityTranscript
+    ? commentTasks?.find((task) => task.id === activeActivityTranscript.taskId) : undefined;
+  const activityTranscriptRun = activityTranscriptTask
+    ? standaloneRuns.find((run) => run.task.id === activityTranscriptTask.id)
+      ?? Array.from(commentRuns.values()).flat().find((run) => run.task.id === activityTranscriptTask.id)
+    : undefined;
 
   // Resolve / unresolve must always clear the per-session expand entry so
   // re-resolving an already-expanded thread folds it back to the bar (the
@@ -3401,7 +3462,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         {reply?.resolved_at && !expandedResolved.has(reply.id) ? <ResolvedThreadBar
           entry={reply} replies={timelineView.threadReplies.get(reply.id) ?? EMPTY_REPLIES}
           onExpand={() => toggleResolvedExpand(reply.id, true)} /> : <AgentRunComment run={item.run} entering={enteringRunIds.has(item.run.task.id)} standalone
-          highlightedId={highlightedId}
+          transcriptControl={transcriptControl} highlightedId={highlightedId}
           commentProps={reply ? {
             issueId: id, replyScrollParent: isFlatTimeline ? null : scrollContainerEl, entry: reply, replies: timelineView.threadReplies.get(reply.id) ?? EMPTY_REPLIES,
             currentUserId: user?.id, canModerate: canModerateComments, onReply: submitReply,
@@ -3435,6 +3496,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             issueId={id}
             replyScrollParent={isFlatTimeline ? null : scrollContainerEl}
             runs={commentRuns.get(item.id) ?? EMPTY_COMMENT_RUNS}
+            transcriptControl={transcriptControl}
             enteringRunIds={enteringRunIds}
             entry={item.entry}
             replies={timelineView.threadReplies.get(item.id) ?? EMPTY_REPLIES}
@@ -4307,6 +4369,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           />
         )}
       </div>
+      {activeActivityTranscript && activityTranscriptTask && (
+        <IssueActivityTranscriptDialog key={activityTranscriptTask.id}
+          task={activityTranscriptTask}
+          parentId={activityTranscriptRun?.anchorCommentId ?? activityTranscriptTask.trigger_comment_id}
+          fromKeyboard={activeActivityTranscript.fromKeyboard}
+          onOpenChange={handleActivityTranscriptOpenChange}
+        />
+      )}
     </CurrentIssueRenderContextProvider>
   );
 

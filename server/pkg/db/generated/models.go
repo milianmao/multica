@@ -646,6 +646,7 @@ type ChatSession struct {
 	PinnedAt            pgtype.Timestamptz `json:"pinned_at"`
 	ProjectID           pgtype.UUID        `json:"project_id"`
 	ExplicitlyCreatedAt pgtype.Timestamptz `json:"explicitly_created_at"`
+	ExecutionConfig     []byte             `json:"execution_config"`
 }
 
 type ChatSubmissionReceipt struct {
@@ -1731,6 +1732,27 @@ type SysCronExecution struct {
 	ErrorMsg     pgtype.Text        `json:"error_msg"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type TaskApproval struct {
+	ID              pgtype.UUID        `json:"id"`
+	TaskID          pgtype.UUID        `json:"task_id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	IssueID         pgtype.UUID        `json:"issue_id"`
+	RuntimeID       pgtype.UUID        `json:"runtime_id"`
+	DispatchedAt    pgtype.Timestamptz `json:"dispatched_at"`
+	ExecutionID     pgtype.UUID        `json:"execution_id"`
+	NativeRequestID string             `json:"native_request_id"`
+	Kind            string             `json:"kind"`
+	Method          string             `json:"method"`
+	Params          []byte             `json:"params"`
+	Status          string             `json:"status"`
+	Decision        pgtype.Text        `json:"decision"`
+	DecidedBy       pgtype.UUID        `json:"decided_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	DecidedAt       pgtype.Timestamptz `json:"decided_at"`
+	ProcessedAt     pgtype.Timestamptz `json:"processed_at"`
+	ExpiredAt       pgtype.Timestamptz `json:"expired_at"`
 }
 
 type TaskContextReceipt struct {
