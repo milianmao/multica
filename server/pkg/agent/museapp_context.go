@@ -2,6 +2,31 @@ package agent
 
 import "strings"
 
+// MuseappTaskEnvNames lists the daemon task context the receptionist carries
+// into the prompt prefix. The receptionist does not spawn a daemon child, so
+// cfg.Env is not inherited and every name must be spelled out here.
+//
+// MULTICA_TOKEN is deliberately absent: the worker sets it from the task
+// record's task_token, keeping the credential out of model-visible text.
+//
+// daemon.TestTaskEnvPassthroughCoversInjectedEnvironment compares this list
+// against the environment the daemon actually injects, so a name added to the
+// run environment cannot be silently dropped here.
+func MuseappTaskEnvNames() []string {
+	return []string{
+		"MULTICA_CLI_PATH", "MULTICA_DAEMON_PORT", "MULTICA_TASK_ID",
+		"MULTICA_AGENT_ID", "MULTICA_AGENT_NAME", "MULTICA_TASK_SLOT",
+		"MULTICA_TASK_CONFIG_ROOT", "MULTICA_TASK_WORKSPACES_ROOT",
+		"MULTICA_AUTOPILOT_ID", "MULTICA_AUTOPILOT_RUN_ID",
+		"MULTICA_CLI_CALLER",
+		"MULTICA_QUICK_CREATE_TASK_ID", "MULTICA_QUICK_CREATE_ATTACHMENT_IDS",
+		"MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_TYPE", "MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_ID",
+		// Filled from the session options rather than the process env; kept last
+		// so the emitted prefix order is stable.
+		"MULTICA_SERVER_URL", "MULTICA_WORKSPACE_ID",
+	}
+}
+
 // The receptionist does not spawn a daemon child, so cfg.Env is not inherited.
 // Put the non-secret daemon task context in the prompt the existing worker
 // already executes. A per-command prefix also works across independent shells.
@@ -11,22 +36,13 @@ func museappTaskPrompt(prompt string, env map[string]string, opts ExecOptions, g
 	if cliPath == "" {
 		return prompt // Standalone Backend callers need not use the Multica CLI.
 	}
-	keys := []string{
-		"MULTICA_CLI_PATH", "MULTICA_DAEMON_PORT", "MULTICA_TASK_ID",
-		"MULTICA_AGENT_ID", "MULTICA_AGENT_NAME", "MULTICA_TASK_SLOT",
-		"MULTICA_TASK_CONFIG_ROOT", "MULTICA_TASK_WORKSPACES_ROOT",
-		"MULTICA_AUTOPILOT_ID", "MULTICA_AUTOPILOT_RUN_ID",
-		"MULTICA_CLI_CALLER",
-		"MULTICA_QUICK_CREATE_TASK_ID", "MULTICA_QUICK_CREATE_ATTACHMENT_IDS",
-		"MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_TYPE", "MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_ID",
-	}
-	values := make(map[string]string, len(keys)+2)
+	keys := MuseappTaskEnvNames()
+	values := make(map[string]string, len(keys))
 	for _, key := range keys {
 		if value := env[key]; value != "" {
 			values[key] = value
 		}
 	}
-	keys = append(keys, "MULTICA_SERVER_URL", "MULTICA_WORKSPACE_ID")
 	values["MULTICA_SERVER_URL"] = opts.MulticaServerURL
 	values["MULTICA_WORKSPACE_ID"] = opts.MulticaWorkspaceID
 	var command strings.Builder

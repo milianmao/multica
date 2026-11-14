@@ -493,7 +493,7 @@ It runs entirely through your authenticated CLI and grants no access of its own 
 
 ### Request attribution from a run
 
-Every request the CLI sends carries `X-Client-Platform`, `X-Client-Version`, and `X-Client-OS`. Inside a daemon-managed run it also carries `X-Client-Caller`, set to the provider that owns that run (`<provider>`, or `<provider>/<version>` when the version of the launched binary is known), so server logs can separate an agent's own CLI call from a human typing in a terminal. The value comes from `MULTICA_CLI_CALLER`, which only the daemon sets; a terminal has no such variable and sends no caller header.
+Every request the CLI sends carries `X-Client-Platform`, `X-Client-Version`, and `X-Client-OS`. Inside a daemon-managed run it also carries `X-Client-Caller`, set to the provider that owns that run (`<provider>`, or `<provider>/<version>` when the version of the launched binary is known), so server logs can separate an agent's own CLI call from a human typing in a terminal. The value comes from `MULTICA_CLI_CALLER`: the daemon sets it when it starts a run, and a terminal has no such variable, so it sends no caller header. The variable is ordinary environment state — any process can set it in any shell — so the value is not trustworthy.
 
 The CLI deliberately leaves `User-Agent` at Go's default and never rewrites another program's UA. `X-Client-Version` is the CLI version source of truth, and a second copy in `User-Agent` would only invite downstream parsing.
 

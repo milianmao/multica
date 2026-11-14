@@ -258,7 +258,7 @@ API key 與 base URL 都為空時，這一層關閉，不會發出任何上游�
 | `MULTICA_WORKSPACES_ROOT` | `~/multica_workspaces` | 執行工作目錄的根目錄 |
 | `MULTICA_AGENT_TEMP_BASE` | `/tmp`（Linux/macOS） | 僅適用於 Linux/macOS。每次執行的私有臨時目錄的父目錄；必須是現有、可寫的絕對路徑，無效值會使執行啟動失敗，不會回退到 `/tmp`。請選擇較短的路徑——子工具可能會在其中繫結 AF_UNIX socket；Linux 的 `sun_path` 上限為 108 位元組，macOS 為 104 位元組 |
 
-守護程序注入 AI 代理 task 的內部上下文見 [Task 執行時環境](/daemon-runtimes#task-執行時環境)。`MULTICA_REPO_CHECKOUT_MODE` 也屬於這類變數：守護程序只在 Linux 和 Windows 的 Codex 執行中把它設為 `isolated`，不需要也無法手動配置。守護程序自身環境裡的 `MULTICA_*` 變數不會傳進執行。`MULTICA_CLI_CALLER` 同樣屬於這類變數：守護程序把它設為擁有本次執行的 provider，供 CLI 傳送 `X-Client-Caller`，也不能手動配置。
+守護程序注入 AI 代理 task 的內部上下文見 [Task 執行時環境](/daemon-runtimes#task-執行時環境)。`MULTICA_REPO_CHECKOUT_MODE` 也屬於這類變數：守護程序只在 Linux 和 Windows 的 Codex 執行中把它設為 `isolated`，不需要也無法手動配置。守護程序自身環境裡的 `MULTICA_*` 變數不會傳進執行。`MULTICA_CLI_CALLER` 也由守護程序注入：它被設為擁有本次執行的 provider，供 CLI 傳送 `X-Client-Caller`。但它只是普通環境變數，任何程序在任何 shell 裡都能設定它，因此該值和其他自述標籤一樣不可信。
 
 優先順序為命令列 flag → 環境變數 → `~/.multica/config.json` → 內建預設。watchdog 的行為見[守護程序與執行時](/daemon-runtimes)。
 

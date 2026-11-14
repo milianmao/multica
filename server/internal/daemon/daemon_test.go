@@ -594,22 +594,85 @@ func TestTaskMulticaEnvironmentIncludesPrivateConfigRoot(t *testing.T) {
 	}
 }
 
-func TestHermesTaskEnvPassthroughCoversTaskEnvironment(t *testing.T) {
+// injectedTaskEnvironment builds the environment a run actually receives, so
+// the passthrough allowlists can be compared against what is really injected
+// rather than against taskMulticaEnvironment alone.
+//
+// runTask adds entries after taskMulticaEnvironment returns (see the
+// injectClientCaller call site); the guard used to enumerate only the builder's
+// own map and was therefore blind to those — MULTICA_CLI_CALLER was completely
+// absent from the check while still present in the environment. Apply every
+// post-assembly injection here as well, or that name escapes both allowlists
+// silently.
+func injectedTaskEnvironment(provider string) map[string]string {
+	env := taskMulticaEnvironment(
+		Task{ID: "task-test", AgentID: "agent-test", WorkspaceID: "workspace-test", QuickCreatePrompt: "create work"},
+		provider, "agent-name", "mat_fixture", "/task/config", "/task/workspaces", "https://task.example", 19514, 3, "/task/tmp")
+	injectClientCaller(env, provider, "1.2.3")
+	return env
+}
+
+// Both passthrough lists rebuild a child environment from an explicit
+// allowlist, so any injected name they omit is silently dropped for tool
+// subprocesses. Checked against the assembled run environment, not against the
+// builder alone.
+func TestTaskEnvPassthroughCoversInjectedEnvironment(t *testing.T) {
 	t.Parallel()
-	names := execenv.HermesTaskEnvPassthroughNames()
-	seen := make(map[string]bool, len(names))
-	for _, name := range names {
-		if !strings.HasPrefix(name, "MULTICA_") || seen[name] {
-			t.Errorf("invalid or duplicate Hermes task environment name: %q", name)
-		}
-		seen[name] = true
+	for _, tc := range []struct {
+		name      string
+		names     []string
+		holder    string
+		withholds map[string]string
+	}{
+		{name: "hermes", names: execenv.HermesTaskEnvPassthroughNames(), holder: "Hermes tool subprocesses"},
+		{
+			name:   "museapp",
+			names:  agent.MuseappTaskEnvNames(),
+			holder: "the museapp prompt prefix",
+			// The prompt prefix is model-visible text, so the task credential is
+			// deliberately withheld: the worker sets MULTICA_TOKEN from the task
+			// record's task_token instead. Every other injected name must pass
+			// through, or the run's CLI silently loses it.
+			withholds: map[string]string{
+				"MULTICA_TOKEN": "the worker sets it from task_token; a prompt is model-visible",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := make(map[string]bool, len(tc.names))
+			for _, name := range tc.names {
+				if !strings.HasPrefix(name, "MULTICA_") || seen[name] {
+					t.Errorf("invalid or duplicate task environment name: %q", name)
+				}
+				seen[name] = true
+			}
+			for name := range injectedTaskEnvironment(tc.name) {
+				if !strings.HasPrefix(name, "MULTICA_") || seen[name] {
+					continue
+				}
+				if _, ok := tc.withholds[name]; ok {
+					continue
+				}
+				t.Errorf("daemon injects %s but %s will drop it", name, tc.holder)
+			}
+			// An exemption is only valid while the list really omits the name;
+			// otherwise it silently covers a real regression.
+			for name, why := range tc.withholds {
+				if seen[name] {
+					t.Errorf("%s is withheld (%s) but appears in the allowlist", name, why)
+				}
+			}
+		})
 	}
-	env := taskMulticaEnvironment(Task{ID: "task-test", AgentID: "agent-test", WorkspaceID: "workspace-test", QuickCreatePrompt: "create work"},
-		"hermes", "agent-name", "mat_fixture", "/task/config", "/task/workspaces", "https://task.example", 19514, 3, "/task/tmp")
-	for name := range env {
-		if strings.HasPrefix(name, "MULTICA_") && !seen[name] {
-			t.Errorf("daemon injects %s but Hermes tool subprocesses will drop it", name)
-		}
+}
+
+// The guard above is only as good as the environment it is given, so pin the
+// one name that regressed: it is injected by runTask, not by the builder.
+func TestInjectedTaskEnvironmentCoversRunTaskInjections(t *testing.T) {
+	t.Parallel()
+	env := injectedTaskEnvironment("codex")
+	if got := env[cli.ClientCallerEnv]; got != "codex/1.2.3" {
+		t.Fatalf("%s = %q, want codex/1.2.3 — runTask-level injections must appear in the guard's environment", cli.ClientCallerEnv, got)
 	}
 }
 
@@ -7015,14 +7078,5 @@ func TestInjectClientCaller(t *testing.T) {
 				t.Fatal("an empty caller value must be absent, not present-and-empty")
 			}
 		})
-	}
-}
-
-// A run that sets MULTICA_CLI_CALLER must not lose it in a Hermes tool
-// subprocess, which rebuilds its environment from an explicit allowlist.
-func TestHermesPassthroughIncludesClientCaller(t *testing.T) {
-	t.Parallel()
-	if !slices.Contains(execenv.HermesTaskEnvPassthroughNames(), cli.ClientCallerEnv) {
-		t.Fatalf("%s is injected into runs but Hermes tool subprocesses will drop it", cli.ClientCallerEnv)
 	}
 }
