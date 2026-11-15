@@ -480,3 +480,74 @@ Desktop main **不读这个 flag**：它没有 server session，拿不到决定�
 | V6 | 持久化 partition 的目录所有权 | 研发 | 本轮明确不做；若将来做，见 §13.4 末段 |
 | V9 | 侧栏最近截图是否直连 attachment URL | 前端 | 未定，按既有 `useDownloadAttachment` 取值 |
 | V10 | `browser_wait` 的 condition 在被测页面内求值 | 安全 | 已评估：agent 自己给的表达式，运行于被测页面上下文，不触及本机权限 |
+
+## 14. 第二轮安全返修（P0×2 新 / P1×2 新 / P2×1 新）
+
+### 14.1 心跳预算：长轮询、tick、超时三者必须成比例
+
+一次心跳的真实周期是「到达 → 阻塞在长轮询 → 返回」，所以**长轮询时长是两次时间戳之间的下限**。原组合（poll 10s / timeout 10s / tick 5s）让空闲会话必然踩线，且 `heartbeat()` 拒绝复活 orphaned，后果是视图还活着而所有工具永久失败。
+
+- 数值：poll **4s**、tick **2s**、timeout **30s**（≈5 次漏报，能吸收 GC 停顿与笔记本唤醒）；
+- 结构：长轮询**返回时**再刷新一次 `lastHeartbeat`（`touchHost`）。只改数值仍会把"正在等待"和"已失联"混为一谈；只加 touch 会让真正死掉的主机藏在自己的在飞请求后面。两者都要。
+- 测试：`TestBrowserIdleSessionSurvivesTheLongPoll` 模拟 5 个完整周期，每步断言 `hosted`，并断言 `poll×3 ≤ timeout`；`TestBrowserDeadHostStillOrphans` 保证反向仍然成立。
+
+### 14.2 `closing` 是有出口的状态
+
+`closing` 不是"还活着的会话"。三处都必须拒绝它：`registerBrowserHost`、`list()`、按 task 复用（统一走 `reusableBrowserState`）。sweep 给 `closing` 一个 **无 ack 超时**（2×heartbeatTimeout = 60s），超时直接 `finalizeLocked`。没有这条，一次崩溃的 Desktop 会让 registry 条目永久驻留，且下一轮运行会继承一条半死的会话。
+
+Desktop 关窗路径改为"尽力 ack + daemon 兜底"：`closeQaBrowserWindow` → `forgetQaBrowserWindow` 会在销毁 view 后异步 ack，失败由上面的超时接管。
+
+### 14.3 evidence 目标由 claim 记录派生
+
+`issue_id`/`workspace_id` 不再从请求体读取。daemon 在 claim 时已经有权威值，随 capability 一起记入 `browserTaskIssues`/`browserTaskWorkspaces`；host 平面建 session 时只接受 `task_id`，目标从记录取，未记录则 **404**。
+
+理由：上传用的是 daemon 自己的凭据，目标是写操作的目的地。让低层输入决定高权写入的位置是典型的 confused deputy，即使 server 侧的 workspace 校验拦住了跨库越权，同库内仍可向任意 issue 写附件。
+
+### 14.4 `document.cookie` 形态
+
+QA 页面打印 `document.cookie` 得到的是**裸 `name=value`**，没有 `Cookie:` 前缀，原规则完全抓不到。新增 `redact.ConsoleText`（只在 console 出口启用，不并入全局 `Text`）：
+
+- 值必须"像不透明标识"：12+ 字符且同时含字母与数字，或 12+ 位纯 hex。`session=failed`、`session=timeout` 这类可读文本必须原样保留——一个会改写正常文本的脱敏器最后会被关掉。
+- `Cookie:` 规则的三个粗糙度一并修掉：值取到行尾（引号内嵌不再留尾字节）、tab 视为分隔符、JSON 引号形态正确消费。
+
+Desktop 侧另有 `qa-browser-redact.ts` 做同一子集：daemon 是权威脱敏点，但同一字符串可能在发请求前就进了 main 进程日志或 crash dump。
+
+### 14.5 `raise()` 必须真的把窗口放到用户眼前
+
+窗口为拿 capture surface 而常驻 `-20000`，但此前**没有任何重定位路径**，"接管"只是把焦点给了一个屏幕外的窗口。实测（Electron 44.9.3）确认两件事：
+
+1. `setPosition` 在窗口**可见**时调用：既移入 workArea，`capturePage` 继续成功；
+2. 在首次 `showInactive()` 之前调用：没有 display surface，之后每次 capture 都抛 `Current display surface not available`。
+
+因此 `raise()`/`setVisible(true)` 的顺序固定为「先 `setPosition` 到 workArea 内，再 `show`/`focus`」。harness 同时断言 bounds 落在 workArea 内**与** capture 仍非空——两条缺一不可。
+
+### 14.6 harness 的通过范围（教训）
+
+上一轮的 harness 只证明 capturePage 链路：它从不启动 `startQaBrowserHostLoop`，所以"会话能活过 60 秒"这件最基本的事没有被覆盖，两个 P0 就是在全绿状态下漏掉的。
+
+现在 harness 显式跑真实心跳循环 ≥60s（12 次采样）并断言 `state=hosted`。**但它的范围仍然有限**：不覆盖多窗口、最小化、进程崩溃重建、真实 a11y 规模。任何引用"harness 通过"的地方都必须指明它证明的是哪一段，否则它会持续为未验证部分提供虚假信心。
+
+### 14.7 R3 已用真实 server 关闭
+
+不再用注入的 in-memory sink 代替。新增 opt-in 测试 `TestBrowserRealServerAttachment`，以 daemon 自身凭据调用生产 `uploadIssueEvidence`：
+
+```
+MULTICA_RUN_REAL_ATTACHMENT_SMOKE=1 MULTICA_SMOKE_ISSUE=... MULTICA_SMOKE_WORKSPACE=... \
+  MULTICA_SMOKE_TOKEN=... go test ./internal/daemon/ -run TestBrowserRealServerAttachment -v
+→ REAL ATTACHMENT id=01a1dec3-8515-7760-8626-723d4db85f68 bytes=70 server=https://api.multica.ai
+```
+
+随后 `multica attachment download` 取回并确认是 `PNG image data, 1 x 1`，完成"上传 → 落库 → 可下载"的真实闭环。
+
+### 14.8 残余风险（第二轮后）
+
+| # | 风险 | owner | 说明 |
+|---|---|---|---|
+| V3 | 窗口最小化时 view 与截图行为 | 研发 | 未验证 |
+| V4 | 真实业务页面 a11y 树规模与 ref 解析开销 | QA | 需真实验收环境 |
+| V5 | `render-process-gone` 后的 view 重建 | 研发 | 单测覆盖状态迁移，真实崩溃未验证 |
+| V6 | 持久化 partition 的目录所有权 | 研发 | 本轮明确不做 |
+| V9 | 侧栏最近截图是否直连 attachment URL | 前端 | 未定 |
+| V11 | 被 `will-navigate` 拦下后 renderer 停留中间态，同 view 紧接着 `loadURL` 可能卡住 | 研发 | 产品路径（一次 goto 一次截图）不受影响；已把 harness 的导航断言放最后 |
+| V12 | harness 覆盖范围有限（见 §14.6） | 研发/QA | 引用时必须限定 |
+| V13 | A1/A3/A4/A7 人工验收 | QA | 未执行；A3 在 §14.5 修复后具备执行条件 |

@@ -1,5 +1,10 @@
 import { QaBrowserHost } from "./qa-browser-host";
-import { closeQaBrowserSession, registerQaBrowserIpc, runQaBrowserCommands } from "./qa-browser-ipc";
+import {
+  closeQaBrowserSession,
+  forgetQaBrowserWindow,
+  registerQaBrowserIpc,
+  runQaBrowserCommands,
+} from "./qa-browser-ipc";
 import { startQaBrowserHostLoop } from "./qa-browser-runtime";
 import type { QaBrowserHostLoop } from "./qa-browser-runtime";
 import { resolveRunningDaemonPort } from "./daemon-manager";
@@ -33,8 +38,16 @@ import { uploadQaBrowserEvidence } from "./qa-browser-evidence";
  */
 let activeHost: QaBrowserHost | null = null;
 
-export function qaBrowserHostOrNull(): QaBrowserHost | null {
-  return activeHost;
+/**
+ * Closes a window's browser sessions and acks them.
+ *
+ * Exposed as one call so the two window-close handlers (main window and
+ * dedicated issue window) share it and neither forgets the ack.
+ */
+export function closeQaBrowserWindow(windowId: number): void {
+  const host = activeHost;
+  if (!host) return;
+  forgetQaBrowserWindow(windowId, host, { resolveDaemon: resolveRunningDaemonPort });
 }
 
 export function setupQaBrowser(): { dispose: () => void } {

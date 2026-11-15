@@ -15,7 +15,14 @@ import type { QaBrowserHost } from "./qa-browser-host";
  * one observation.
  */
 
-const HEARTBEAT_INTERVAL_MS = 5_000;
+/**
+ * Wall-clock spacing between heartbeat starts.
+ *
+ * Worst case an iteration takes `HEARTBEAT_INTERVAL_MS + LONG_POLL_MS` (6s at
+ * these values), still an order of magnitude inside the daemon's 30s orphan
+ * threshold. Do not raise this without raising that threshold first.
+ */
+const HEARTBEAT_INTERVAL_MS = 2_000;
 
 export type QaBrowserHostLoopDeps = {
   host: QaBrowserHost;

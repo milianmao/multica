@@ -20,8 +20,7 @@ import {
   setupDaemonManager,
 } from "./daemon-manager";
 import { setupLocalDirectory } from "./local-directory";
-import { qaBrowserHostOrNull, setupQaBrowser } from "./qa-browser-setup";
-import { forgetQaBrowserWindow } from "./qa-browser-ipc";
+import { closeQaBrowserWindow, setupQaBrowser } from "./qa-browser-setup";
 import { setupThemeFolder } from "./theme-folder";
 import { configureLinuxFileDialogs } from "./linux-file-dialog";
 import { openExternalSafely, downloadURLSafely } from "./external-url";
@@ -502,8 +501,7 @@ function createMainWindow(saved: WindowState = {}): BrowserWindow {
     if (unreadBadgeCounts.delete(window)) applyUnreadBadge();
     // A closed window must not leave a QA browser view behind: the daemon would
     // keep heartbeating a session nobody can reach.
-    const qaBrowserHost = qaBrowserHostOrNull();
-    if (qaBrowserHost) forgetQaBrowserWindow(window.id, qaBrowserHost);
+    closeQaBrowserWindow(window.id);
     if (mainWindows.size > 0) saveWindowSession();
   });
 
@@ -647,8 +645,7 @@ function createIssueWindow(context: IssueWindowContext): void {
     // The sidebar card can open a browser from a dedicated issue window too,
     // so this path owes the same teardown as a main window: without it the view
     // would outlive its window and wait out the idle TTL.
-    const qaBrowserHost = qaBrowserHostOrNull();
-    if (qaBrowserHost) forgetQaBrowserWindow(window.id, qaBrowserHost);
+    closeQaBrowserWindow(window.id);
   });
 
   window.on("ready-to-show", () => window.show());

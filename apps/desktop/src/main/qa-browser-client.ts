@@ -16,7 +16,14 @@ import { parseQaBrowserSessionView } from "../shared/qa-browser-types";
 const HOST_SECRET_FILE = "browser-host.secret";
 const REQUEST_TIMEOUT_MS = 15_000;
 /** Shorter than the request timeout so a long poll cannot race it. */
-const LONG_POLL_MS = 10_000;
+/**
+ * How long one heartbeat blocks waiting for commands.
+ *
+ * This is the floor on the gap between two heartbeats, so it must stay far
+ * below the daemon's `defaultBrowserHeartbeatTimeout` (30s): at 10s the poll
+ * itself consumed the liveness budget and an idle session orphaned itself.
+ */
+const LONG_POLL_MS = 4_000;
 
 export type QaBrowserDaemonPort = {
   port: number;

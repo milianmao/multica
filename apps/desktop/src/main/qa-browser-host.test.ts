@@ -69,6 +69,7 @@ function fakeView(id = 1): FakeView {
     return {};
   });
   const listeners: Record<string, Listener[]> = {};
+  let attached = false;
   return {
     webContents: {
       id,
@@ -88,8 +89,13 @@ function fakeView(id = 1): FakeView {
       setWindowOpenHandler: vi.fn(),
       session: { setPermissionRequestHandler: vi.fn(), on: vi.fn() },
       debugger: {
-        attach: vi.fn(),
-        isAttached: () => true,
+        attach: vi.fn(() => {
+          attached = true;
+        }),
+        // Starts unattached, like a fresh view: `ensureDebugger` only wires the
+        // console listener on the attach path, so a fake that claims to be
+        // already attached silently skips it.
+        isAttached: () => attached,
         sendCommand,
         on: vi.fn(),
         removeListener: vi.fn(),
@@ -107,20 +113,27 @@ interface FakeWindow {
   show: ReturnType<typeof vi.fn>;
   showInactive: ReturnType<typeof vi.fn>;
   setPosition: ReturnType<typeof vi.fn>;
+  getBounds: () => { x: number; y: number; width: number; height: number };
   focus: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
   isDestroyed: () => boolean;
   webContents: { id: number };
 }
 
+const WORK_AREA = { x: 0, y: 0, width: 1920, height: 1032 };
+
 function fakeWindow(overrides: Partial<FakeWindow> = {}): FakeWindow {
+  let pos = { x: -20000, y: -20000 };
   return {
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     getContentBounds: () => ({ x: 0, y: 0, width: 1200, height: 900 }),
     isMinimized: () => false,
     show: vi.fn(),
     showInactive: vi.fn(),
-    setPosition: vi.fn(),
+    setPosition: vi.fn((x: number, y: number) => {
+      pos = { x, y };
+    }),
+    getBounds: () => ({ x: pos.x, y: pos.y, width: 1000, height: 720 }),
     focus: vi.fn(),
     destroy: vi.fn(),
     isDestroyed: () => false,
@@ -144,6 +157,7 @@ function makeHost(options: { sendCommand?: (method: string) => Record<string, un
       views.push(view);
       return view;
     },
+    workArea: () => WORK_AREA,
   };
   return { adapters, views, windows, host: new QaBrowserHost(asAdapters(adapters)) };
 }
@@ -196,6 +210,35 @@ describe("QaBrowserHost", () => {
     expect(host.raise("bs_1")).toBe(true);
     expect(windows[0]!.show).toHaveBeenCalledTimes(1);
     expect(windows[0]!.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("brings the raised window inside the work area, and keeps the capture surface", async () => {
+    const { views, windows, host } = makeHost();
+    host.ensure(SESSION);
+    // Parked off-screen at creation (that is what buys a surface silently).
+    expect(windows[0]!.getBounds().x).toBe(-20000);
+
+    host.raise("bs_1");
+
+    const bounds = windows[0]!.getBounds();
+    expect(bounds.x).toBeGreaterThanOrEqual(WORK_AREA.x);
+    expect(bounds.y).toBeGreaterThanOrEqual(WORK_AREA.y);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(WORK_AREA.x + WORK_AREA.width);
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(WORK_AREA.y + WORK_AREA.height);
+
+    // Visibility must not cost the screenshot chain: measured on Electron
+    // 44.9.3, moving while visible keeps the display surface; moving before the
+    // first showInactive does not.
+    const capture = await host.capture("bs_1", 4 << 20);
+    expect(capture && "png" in capture).toBe(true);
+    expect(views[0]!.webContents.capturePage).toHaveBeenCalled();
+  });
+
+  it("also brings the window on screen when the sidebar shows it", () => {
+    const { windows, host } = makeHost();
+    host.ensure(SESSION);
+    host.setVisible("bs_1", true);
+    expect(windows[0]!.getBounds().x).toBeGreaterThanOrEqual(0);
   });
 
   it("toggles visibility without rebuilding the view", () => {
@@ -393,6 +436,37 @@ describe("QaBrowserHost", () => {
 
     const result = await host.execute("bs_1", { id: "c1", action: "browser_screenshot" });
     expect(result).toEqual({ id: "c1", ok: false, error: "BROWSER_EVIDENCE_FAILED" });
+  });
+
+  it("redacts console output before returning it", async () => {
+    // Seed the buffer through the real listener path: `execute` attaches the
+    // debugger, which registers the console listener, so the line has to be
+    // delivered the way Chromium delivers it.
+    const emitted: string[] = [];
+    const { views, host } = makeHost();
+    host.ensure(SESSION);
+    const webContents = views[0]!.webContents;
+    const debuggerMock = webContents.debugger as unknown as {
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+    };
+    const originalOn = debuggerMock.on;
+    debuggerMock.on = (event, listener) => {
+      originalOn.call(debuggerMock, event, listener);
+      if (event === "message") {
+        emitted.push("registered");
+        // Chromium's shape: (event, method, params, sessionId).
+        listener({}, "Runtime.consoleAPICalled", {
+          args: [{ value: "Cookie: session=abc123def456" }, { value: "sid=SECRETVALUE0123456789" }],
+        }, "");
+      }
+    };
+
+    const result = await host.execute("bs_1", { id: "c1", action: "browser_console" });
+    expect(emitted).toHaveLength(1);
+    expect(result.ok).toBe(true);
+    expect(result.text).not.toContain("abc123def456");
+    expect(result.text).not.toContain("SECRETVALUE0123456789");
+    expect(result.text).toContain("[REDACTED COOKIE]");
   });
 
   it("drops the query string from a reported URL", () => {

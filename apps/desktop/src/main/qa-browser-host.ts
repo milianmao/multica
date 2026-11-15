@@ -1,5 +1,6 @@
-import { BaseWindow, WebContentsView } from "electron";
+import { BaseWindow, WebContentsView, screen } from "electron";
 import { computeViewBounds } from "../shared/qa-browser";
+import { redactConsoleText } from "./qa-browser-redact";
 import type { QaBrowserRect } from "../shared/qa-browser";
 import type { QaBrowserHostCommand, QaBrowserHostCommandResult } from "./qa-browser-client";
 
@@ -62,6 +63,7 @@ export type QaBrowserView = {
 export type QaBrowserWindow = {
   contentView: { addChildView(view: QaBrowserView): void; removeChildView(view: QaBrowserView): void };
   getContentBounds(): { x: number; y: number; width: number; height: number };
+  getBounds?(): { x: number; y: number; width: number; height: number };
   isMinimized(): boolean;
   show(): void;
   /** Shows without taking focus — the capture-surface path (P3-safe). */
@@ -90,6 +92,8 @@ export type QaBrowserHostAdapters = {
     y?: number;
     skipTaskbar?: boolean;
   }): QaBrowserWindow;
+  /** The primary display's usable rectangle, for bringing a window on screen. */
+  workArea(): QaBrowserRect;
   createView(options: { partition: string }): QaBrowserView;
 };
 
@@ -133,6 +137,7 @@ export function createProductionAdapters(): QaBrowserHostAdapters {
         y: options.y,
         skipTaskbar: options.skipTaskbar,
       }) as unknown as QaBrowserWindow,
+    workArea: () => screen.getPrimaryDisplay().workArea,
     createView: (options) =>
       new WebContentsView({
         webPreferences: {
@@ -282,16 +287,45 @@ export class QaBrowserHost {
     });
   }
 
-  /** Shows or hides the window without touching the view (I3). */
+  /**
+   * Shows or hides the window without touching the view (I3).
+   *
+   * Showing also brings the window into the visible work area. The window is
+   * parked off-screen at creation (that is what buys a capture surface without
+   * stealing focus), so a bare `show()` would put it somewhere the user cannot
+   * see — which is exactly what "打开浏览器" did before.
+   */
   setVisible(sessionId: string, visible: boolean): boolean {
     const entry = this.entries.get(sessionId);
     if (!entry) return false;
     entry.visible = visible;
     entry.view.setVisible(visible);
     if (visible) {
+      this.moveIntoWorkArea(entry);
       entry.window.show();
     }
     return true;
+  }
+
+  /**
+   * Moves a parked window into the primary display's work area.
+   *
+   * Measured on Electron 44.9.3: `setPosition` while the window is *visible*
+   * both relocates it and keeps `capturePage()` working. Calling it before the
+   * first `showInactive()` leaves no display surface (capture then throws
+   * "Current display surface not available"), so this must only ever run on a
+   * window that already has one — i.e. after `ensure()`.
+   */
+  private moveIntoWorkArea(entry: QaBrowserHostEntry): void {
+    const area = this.adapters.workArea();
+    const bounds = entry.window.getBounds?.();
+    const width = bounds?.width ?? 1000;
+    const height = bounds?.height ?? 720;
+    // Top-left with a small inset, clamped so a window larger than the work
+    // area still starts inside rather than hanging off the top-left corner.
+    const x = Math.min(area.x + 40, Math.max(area.x, area.x + area.width - width));
+    const y = Math.min(area.y + 40, Math.max(area.y, area.y + area.height - height));
+    entry.window.setPosition?.(x, y);
   }
 
   /** Applies a geometry update in CSS px; main converts and clamps. */
@@ -315,6 +349,9 @@ export class QaBrowserHost {
     if (!entry) return false;
     entry.visible = true;
     entry.view.setVisible(true);
+    // Move first, then show: a takeover has to produce a window the person can
+    // actually see, not one focused off-screen.
+    this.moveIntoWorkArea(entry);
     entry.window.show();
     entry.window.focus();
     return true;
@@ -452,12 +489,18 @@ export class QaBrowserHost {
           return await this.wait(sessionId, command.id, condition, timeoutMs);
         }
         case "browser_console":
-          // Redacted again on the daemon boundary; doing it here too keeps the
-          // text out of any Desktop-side log or crash dump of this string.
+          // Console lines only accumulate once the debugger is attached, and a
+          // session whose first action is `browser_console` would otherwise
+          // report "(no console output)" against a page that logged plenty.
+          this.ensureDebugger(entry);
+          // Redacted here *and* on the daemon boundary. The daemon is the
+          // authoritative pass (it owns the full rule set and feeds both the
+          // agent and the transcript); this one keeps the raw text out of any
+          // Desktop-side log line or crash dump of this string.
           return {
             id: command.id,
             ok: true,
-            text: entry.console.join("\n") || "(no console output)",
+            text: redactConsoleText(entry.console.join("\n")) || "(no console output)",
           };
         case "browser_screenshot": {
           if (!this.captureEvidence) {

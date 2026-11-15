@@ -280,12 +280,38 @@ function readReportedURL(raw: string): { host: string; path: string } {
  * heartbeating a session nobody can see, and the WebContentsView would outlive
  * every surface that could close it.
  */
-export function forgetQaBrowserWindow(windowId: number, host: QaBrowserHost): void {
+export function forgetQaBrowserWindow(
+  windowId: number,
+  host: QaBrowserHost,
+  deps?: Pick<QaBrowserDeps, "resolveDaemon">,
+): void {
   const owned = ownedSessions.get(windowId);
   if (owned) {
-    for (const sessionId of owned) host.destroy(sessionId);
+    for (const sessionId of owned) {
+      host.destroy(sessionId);
+      // Best-effort phase-two ack. A window close is the one path where nobody
+      // is left to answer the daemon's directive, so without this the session
+      // waits out its no-ack timeout; the daemon also has that timeout as a
+      // backstop, so a failure here is a delay, not a leak.
+      if (deps) void ackClosedInBackground(deps, sessionId);
+    }
   }
   releaseWindowSessions(windowId);
+}
+
+async function ackClosedInBackground(
+  deps: Pick<QaBrowserDeps, "resolveDaemon">,
+  sessionId: string,
+): Promise<void> {
+  try {
+    const target = await deps.resolveDaemon();
+    if (!target) return;
+    const secret = await readQaBrowserHostSecret(target.profile);
+    if (!secret) return;
+    await ackQaBrowserSessionClosed(target, secret, sessionId);
+  } catch {
+    // The daemon's no-ack timeout covers it.
+  }
 }
 
 /** Ack helper for the closing directive: destroy, then tell the daemon. */

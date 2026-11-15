@@ -20,6 +20,8 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { homedir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,6 +107,7 @@ function electronSource({ pageURL, daemon, stateFile }) {
 import { app } from "electron";
 import { writeFileSync } from "node:fs";
 import { QaBrowserHost } from ${JSON.stringify(resolve(repoRoot, "apps/desktop/src/main/qa-browser-host.ts"))};
+import { startQaBrowserHostLoop } from ${JSON.stringify(resolve(repoRoot, "apps/desktop/src/main/qa-browser-runtime.ts"))};
 
 const REPORT = ${JSON.stringify(stateFile)};
 const DAEMON = ${JSON.stringify(daemon)};
@@ -224,6 +227,69 @@ app.whenReady().then(async () => {
       { result: shot.result },
     );
 
+    // P0-1 (new) — the session must survive being idle.
+    //
+    // The defect was structural: one heartbeat blocked in a long poll for as
+    // long as the orphan threshold, so a quiet session declared itself dead.
+    // Only the REAL loop can show this, which is why the previous harness (which
+    // never started it) missed it entirely. Run it for 60s — 30 ticks at the
+    // shipped 2s interval — and require the daemon to still report hosted.
+    const loop = startQaBrowserHostLoop({
+      host,
+      resolveDaemon: async () => ({ port: DAEMON.port, profile: DAEMON.profile }),
+      closeSession: async (_target, _secret, sid) => {
+        note("daemon asked to close the view during the soak", true, { sid });
+        host.destroy(sid);
+      },
+      executeCommands: (sid, commands) => Promise.all(commands.map((command) => host.execute(sid, command))),
+      onDaemonLost: () => {},
+      intervalMs: 2000,
+    });
+    const SOAK_MS = 60_000;
+    const started = Date.now();
+    let finalState = "";
+    let heartbeats = 0;
+    while (Date.now() - started < SOAK_MS) {
+      await new Promise((r) => setTimeout(r, 5000));
+      heartbeats += 1;
+      const state = await host.execute(sessionId, { id: "probe-" + heartbeats, action: "browser_url" });
+      const listed = await fetch("http://127.0.0.1:" + DAEMON.port + "/browser/host/sessions", {
+        headers: { Authorization: "Bearer " + DAEMON.secret },
+      }).then((r) => r.json());
+      const entry = (listed.sessions || []).find((s) => s.session_id === sessionId);
+      finalState = entry ? entry.state : "missing";
+      if (!entry) {
+        note("session disappeared during the soak", false, {
+          atMs: Date.now() - started,
+          sessions: (listed.sessions || []).map((x) => ({ id: x.session_id, state: x.state })),
+        });
+      }
+      if (!state.ok) {
+        note("session still usable during the soak", false, { at: Date.now() - started, error: state.error });
+        break;
+      }
+    }
+    loop.stop();
+    note("real heartbeat loop ran for 60s", Date.now() - started >= SOAK_MS, { elapsedMs: Date.now() - started, checks: heartbeats });
+    note("session still hosted after 60s of the real loop", finalState === "hosted", { finalState });
+
+    // P0-2 (new) — a takeover must produce a window the person can see, and
+    // that must not cost the screenshot chain.
+    host.ensure({ sessionId, taskId: DAEMON.task_id, issueId: DAEMON.issue, partition: host.list()[0].partition });
+    host.raise(sessionId);
+    await new Promise((r) => setTimeout(r, 800));
+    const raised = host.list()[0].window.getBounds();
+    const area = require("electron").screen.getPrimaryDisplay().workArea;
+    const inside =
+      raised.x >= area.x &&
+      raised.y >= area.y &&
+      raised.x + raised.width <= area.x + area.width &&
+      raised.y + raised.height <= area.y + area.height;
+    note("takeover puts the window inside the work area", inside, { raised, area });
+    const afterRaise = await host.capture(sessionId, 4 * 1024 * 1024);
+    note("capture still works after the window is raised", !!(afterRaise && "png" in afterRaise),
+      afterRaise && "png" in afterRaise ? { bytes: afterRaise.png.length } : afterRaise);
+
     // P2-6 in the real runtime, LAST. A page-initiated navigation is the only
     // form will-navigate gates; main's own loadURL bypasses it, which is why
     // browser_goto validates the scheme itself.
@@ -269,11 +335,20 @@ async function main() {
   record("real daemon mux started", true, { port: daemon.port });
 
   section("electron");
+  // The heartbeat loop resolves the host secret from the Desktop profile dir, so
+  // the harness writes a real one. Using the real path (rather than injecting a
+  // secret) is deliberate: it keeps `readQaBrowserHostSecret` in the tested
+  // path instead of stubbing the very lookup that could regress.
+  const profile = "desktop-harness";
+  const profilePath = join(homedir(), ".multica", "profiles", profile);
+  mkdirSync(profilePath, { recursive: true });
+  writeFileSync(join(profilePath, "browser-host.secret"), `${daemon.secret}\n`, "utf8");
+
   const work = mkdtempSync(join(tmpdir(), "orio7-harness-"));
   const stateFile = join(work, "state.json");
   const entrySource = join(work, "entry.ts");
   const entryBundle = join(work, "main.cjs");
-  writeFileSync(entrySource, electronSource({ pageURL, daemon, stateFile }));
+  writeFileSync(entrySource, electronSource({ pageURL, daemon: { ...daemon, profile }, stateFile }));
   await build({
     entryPoints: [entrySource],
     outfile: entryBundle,
@@ -334,6 +409,11 @@ async function main() {
   page.close();
   daemonProcess.kill();
   rmSync(work, { recursive: true, force: true });
+  try {
+    rmSync(profilePath, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
 }
 
 main()
