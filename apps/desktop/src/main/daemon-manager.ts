@@ -230,6 +230,23 @@ async function fetchProfileHealth(
   );
 }
 
+/**
+ * The daemon this Desktop profile runs, with its health port, for callers that
+ * need to speak to it on its own planes (the QA browser host plane). Null while
+ * the daemon is not running: those callers must report "unavailable" rather
+ * than probing a port nothing listens on.
+ */
+export async function resolveRunningDaemonPort(): Promise<{ port: number; profile: string } | null> {
+  const active = await ensureActiveProfile();
+  if (!active) return null;
+  const health = await probeProfileHealth(active.name, async (port) => {
+    const payload = await fetchHealthAtPort(port);
+    return payload ? { ...payload, port } : null;
+  });
+  if (!health || health.status !== "running") return null;
+  return { port: health.port, profile: active.name };
+}
+
 /** Brings forward a desktop app this profile's daemon detected. */
 async function focusEnvironment(key: unknown): Promise<FocusEnvironmentResult> {
   if (typeof key !== "string" || key === "" || key.length > 128) {

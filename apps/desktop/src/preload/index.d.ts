@@ -19,6 +19,14 @@ import type {
 } from "../shared/daemon-types";
 import type { TabSelectionShortcutKey } from "../shared/main-renderer-messages";
 import type {
+  QaBrowserActionResult,
+  QaBrowserBoundsRequest,
+  QaBrowserEvidenceResult,
+  QaBrowserOpenRequest,
+  QaBrowserSessionRequest,
+  QaBrowserToggleRequest,
+} from "../shared/qa-browser";
+import type {
   ThemeFolderFile,
   ThemeFolderSnapshot,
   ThemeFolderWriteResult,
@@ -178,6 +186,16 @@ type DaemonReauthResult =
   | { ok: false; reason: "session_invalid" }
   | { ok: false; reason: "transient"; message: string };
 
+interface QaBrowserAPI {
+  open: (request: QaBrowserOpenRequest) => Promise<QaBrowserActionResult>;
+  getSessionState: () => Promise<QaBrowserActionResult>;
+  setVisible: (request: QaBrowserToggleRequest) => void;
+  setBounds: (request: QaBrowserBoundsRequest) => void;
+  takeover: (request: QaBrowserSessionRequest) => Promise<QaBrowserActionResult>;
+  release: (request: QaBrowserSessionRequest) => Promise<QaBrowserActionResult>;
+  captureEvidence: (request: QaBrowserSessionRequest) => Promise<QaBrowserEvidenceResult>;
+}
+
 type FocusEnvironmentResult =
   | { ok: true }
   | { ok: false; reason: "gone" | "unsupported" | "unavailable" | "failed"; error?: string };
@@ -228,6 +246,7 @@ declare global {
     electron: ElectronAPI;
     desktopAPI: DesktopAPI;
     daemonAPI: DaemonAPI;
+    qaBrowser?: QaBrowserAPI;
     updater: UpdaterAPI;
   }
 }
