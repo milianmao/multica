@@ -470,7 +470,7 @@ CLI 配置文件包含可代表你访问 Multica 的令牌。不要提交到仓�
 
 ### 运行中的请求归属
 
-CLI 发出的每个请求都会带 `X-Client-Platform`、`X-Client-Version` 和 `X-Client-OS`。在守护进程托管的运行中，还会带 `X-Client-Caller`，值为拥有该运行的 provider（`<provider>`，已知本轮启动二进制的版本时为 `<provider>/<version>`），这样服务端日志可以区分“智能体在运行里调用 CLI”和“人在终端敲命令”。该值来自 `MULTICA_CLI_CALLER`：守护进程在启动运行时设置它，终端没有这个变量，因此不会发送该头。该变量只是普通环境变量，任何进程在任何 shell 里都能设置它，所以这个值不可信。
+CLI 发出的每个请求都会带 `X-Client-Platform`、`X-Client-Version` 和 `X-Client-OS`。在守护进程托管的运行中，还会带 `X-Client-Caller`，值为拥有该运行的 provider（`<provider>`，已知本轮启动二进制的版本时为 `<provider>/<version>`），入口或代理日志可以借此把请求归因到“智能体在运行里调用 CLI”，而不是“人在终端敲命令”。服务端目前不读取该头，因此 API 日志里还无法区分这两者。该值来自 `MULTICA_CLI_CALLER`：守护进程在启动运行时设置它，终端没有这个变量，因此不会发送该头。该变量只是普通环境变量，任何进程在任何 shell 里都能设置它，所以这个值不可信。
 
 CLI 有意让 `User-Agent` 保持 Go 默认值，也不会改写其他程序的 UA。`X-Client-Version` 才是 CLI 版本的事实来源，在 `User-Agent` 里再放一份只会诱导下游去解析它。
 

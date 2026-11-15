@@ -671,10 +671,12 @@ func TestHTTPErrorKeepsLargeStructuredBody(t *testing.T) {
 	}
 }
 
-// The daemon is the only writer of MULTICA_CLI_CALLER, so the header is how a
-// server can tell an agent's own CLI call from a human's terminal command. It
-// must stay a best-effort label: an unusable value is dropped, never raised as
-// an error, because a bad env value must not fail an otherwise valid command.
+// The daemon injects MULTICA_CLI_CALLER into a run's environment, so the header
+// is how an ingress or proxy log can later tell an agent's own CLI call from a
+// human's terminal command. The server does not consume it today, and the value
+// is self-reported — any process can set the variable — so it stays a
+// best-effort label: an unusable value is dropped, never raised as an error,
+// because a bad env value must not fail an otherwise valid command.
 func TestSetHeaders_ClientCaller(t *testing.T) {
 	send := func(t *testing.T, caller string) (got, ua string) {
 		t.Helper()
@@ -736,6 +738,23 @@ func TestSetHeaders_ClientCaller(t *testing.T) {
 		{"path traversal", "../../etc/passwd"},
 		{"uppercase provider", "Codex/1.0"},
 		{"shell metacharacter", "codex;rm -rf /"},
+		// Boundaries are contract violations, not values to clean up and send.
+		// These are the cases a pre-validation TrimSpace silently legalized.
+		{"leading crlf", "\r\ncodex/0.104.0"},
+		{"trailing crlf", "codex/0.104.0\r\n"},
+		{"leading newline", "\ncodex/0.104.0"},
+		{"trailing newline", "codex/0.104.0\n"},
+		{"leading carriage return", "\rcodex/0.104.0"},
+		{"trailing carriage return", "codex/0.104.0\r"},
+		{"leading space", " codex/0.104.0"},
+		{"trailing space", "codex/0.104.0 "},
+		{"leading tab", "\tcodex/0.104.0"},
+		{"trailing tab", "codex/0.104.0\t"},
+		{"leading NUL", "\x00codex/0.104.0"},
+		{"trailing NUL", "codex/0.104.0\x00"},
+		{"leading escape", "\x1bcodex/0.104.0"},
+		{"trailing del", "codex/0.104.0\x7f"},
+		{"surrounding crlf", "\r\ncodex/0.104.0\r\n"},
 	} {
 		t.Run("dropped: "+tc.name, func(t *testing.T) {
 			if got, _ := send(t, tc.value); got != "" {
@@ -759,6 +778,15 @@ func TestCallerValue(t *testing.T) {
 		{"Codex", "1.0", ""},
 		{"codex", "1.2.3-beta+build", "codex/1.2.3-beta+build"},
 		{"opencode", strings.Repeat("1", 40), "opencode"},
+		// Construction trims each segment's outer edges because a probe returns
+		// a text line, and the joined result is then held to the full contract.
+		{"codex", "0.104.0\n", "codex/0.104.0"},
+		{"codex", " 0.104.0 ", "codex/0.104.0"},
+		{" codex ", "0.104.0", "codex/0.104.0"},
+		// Interior bytes are never cleaned: they reject the value.
+		{"codex", "0.10\r\n4.0", "codex"},
+		{"codex", "0.1\t04", "codex"},
+		{"codex", "\x00" + "1.0", "codex"},
 	} {
 		if got := CallerValue(tc.provider, tc.version); got != tc.want {
 			t.Errorf("CallerValue(%q, %q) = %q, want %q", tc.provider, tc.version, got, tc.want)

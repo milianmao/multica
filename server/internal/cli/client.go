@@ -26,9 +26,11 @@ var ClientVersion = "dev"
 // or alternative entry points; defaults to "cli".
 var ClientPlatform = "cli"
 
-// ClientCallerEnv carries the agent provider that owns the current run. Only
-// the daemon sets it (in a task's environment), so a terminal user has no value
-// and sends no caller header; the variable's presence is the whole switch.
+// ClientCallerEnv is the variable the daemon injects into a run's environment
+// so the CLI can label its requests. Its presence is the whole switch.
+//
+// It is ordinary environment state: any process in any shell can set it, so a
+// value is self-reported and never proof of who made a request.
 const ClientCallerEnv = "MULTICA_CLI_CALLER"
 
 // ClientCaller is the optional <provider>[/<version>] identity sent as
@@ -49,8 +51,13 @@ var clientCallerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,31}(/[A-Za
 // normalizeClientCaller returns value when it is a well-formed caller identity,
 // and "" otherwise. Callers drop the header instead of failing: a malformed
 // value must never make an otherwise-valid command fail.
+//
+// Deliberately no TrimSpace: leading or trailing bytes are a contract
+// violation, not something to clean up and then send. Trimming first would let
+// "\r\ncodex/1.0" through as a well-formed header, which is exactly the
+// control-character case the value has to be rejected for. Probe output is
+// normalized where the value is built (see CallerValue), not on the send path.
 func normalizeClientCaller(value string) string {
-	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 64 || !clientCallerPattern.MatchString(value) {
 		return ""
 	}
@@ -58,10 +65,18 @@ func normalizeClientCaller(value string) string {
 }
 
 // CallerValue formats the X-Client-Caller value for a run, or "" when the
-// provider cannot be expressed. An unusable version drops to the provider alone
-// instead of discarding the identity: version probes may return a banner line
-// rather than a version (see extractVersionLine), and losing attribution over
-// that is worse than losing the version.
+// provider cannot be expressed.
+//
+// The trimming here is construction, not sending: version probes return a text
+// line and extractVersionLine can carry trailing whitespace, so the two
+// segments are normalized before they are joined. What leaves this function is
+// then held to the full contract by normalizeClientCaller — only the outer
+// edges of each segment are cleaned, so an interior control character still
+// rejects the value.
+//
+// An unusable version drops to the provider alone instead of discarding the
+// identity: losing attribution over a banner-shaped version is the worse
+// trade.
 func CallerValue(provider, version string) string {
 	provider = strings.TrimSpace(provider)
 	if version = strings.TrimSpace(version); version != "" {
