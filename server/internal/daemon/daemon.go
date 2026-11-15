@@ -179,6 +179,16 @@ func taskScopedAuthToken(task Task) (string, error) {
 	return token, nil
 }
 
+// injectClientCaller records the provider that owns this run so the CLI can
+// label its API requests. Absent (not empty) is the switch: a value the CLI
+// cannot express means no env entry at all, which is the same as a human
+// terminal as far as the CLI is concerned.
+func injectClientCaller(env map[string]string, provider, resolvedVersion string) {
+	if caller := cli.CallerValue(provider, resolvedVersion); caller != "" {
+		env[cli.ClientCallerEnv] = caller
+	}
+}
+
 func taskMulticaEnvironment(task Task, provider, agentName, token, configRoot, workspacesRoot, serverURL string, healthPort, slot int, tempDir string) map[string]string {
 	env := map[string]string{
 		"MULTICA_TOKEN":        token,
@@ -8870,6 +8880,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.AutopilotID != "" {
 		agentEnv["MULTICA_AUTOPILOT_ID"] = task.AutopilotID
 	}
+	// Tell the CLI which provider owns this run so its API requests can carry
+	// X-Client-Caller. resolvedVersion, not agentVersion(): the latter is a
+	// registration-time probe that lags an in-place upgrade (MUL-4486), and the
+	// caller segment must describe the binary this run actually launched.
+	injectClientCaller(agentEnv, provider, resolvedVersion)
 	// Quick-create marker — when set, the multica CLI's `issue create`
 	// command stamps the new issue with origin_type=quick_create +
 	// origin_id=<task_id> so the completion handler can find it

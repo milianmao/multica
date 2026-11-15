@@ -491,6 +491,14 @@ If most of your work already happens inside Codex, Claude Code, or Cursor, you c
 
 It runs entirely through your authenticated CLI and grants no access of its own — permissions still come from your login, selected profile, and workspace. It requires CLI v0.4.26 or newer. The repository README covers installation for the Claude Code plugin marketplace, the Codex skill installer, Cursor, and any other tool that loads Markdown instructions.
 
+### Request attribution from a run
+
+Every request the CLI sends carries `X-Client-Platform`, `X-Client-Version`, and `X-Client-OS`. Inside a daemon-managed run it also carries `X-Client-Caller`, set to the provider that owns that run (`<provider>`, or `<provider>/<version>` when the version of the launched binary is known), which lets an ingress or proxy log attribute a request to an agent's own CLI call rather than a human typing in a terminal. The server does not read this header today, so nothing in the API logs distinguishes the two yet. The value comes from `MULTICA_CLI_CALLER`: the daemon sets it when it starts a run, and a terminal has no such variable, so it sends no caller header. The variable is ordinary environment state — any process can set it in any shell — so the value is not trustworthy.
+
+The CLI deliberately leaves `User-Agent` at Go's default and never rewrites another program's UA. `X-Client-Version` is the CLI version source of truth, and a second copy in `User-Agent` would only invite downstream parsing.
+
+`X-Client-Caller` is self-reported: anything inside the run can forge it or set the variable itself. Treat it as an observability label only — never as an authorization, quota, billing, or attribution input. Identity still comes from the `mat_` task token. A malformed value (control characters, non-ASCII, or more than 64 bytes) is dropped rather than failing the command.
+
 ## Next steps
 
 - [Multica CLI skill](https://github.com/multica-ai/multica-cli) — operate Multica from Codex, Claude Code, or Cursor.

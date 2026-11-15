@@ -41,6 +41,10 @@ func init() {
 	// Tag every CLI HTTP request with this binary's build version so the
 	// server can split logs/metrics by client version.
 	cli.ClientVersion = version
+	// The daemon sets MULTICA_CLI_CALLER in a run's environment; its presence
+	// (and nothing else) turns on the X-Client-Caller header. A terminal has no
+	// value, so human invocations are unaffected.
+	cli.ClientCaller = os.Getenv(cli.ClientCallerEnv)
 
 	rootCmd.PersistentFlags().String("server-url", "", "Multica server URL (env: MULTICA_SERVER_URL)")
 	rootCmd.PersistentFlags().String("workspace-id", "", "Workspace ID (env: MULTICA_WORKSPACE_ID)")

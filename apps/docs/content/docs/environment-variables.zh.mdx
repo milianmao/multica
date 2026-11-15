@@ -262,7 +262,7 @@ API key 与 base URL 都为空时，这一层关闭，不会发出任何上游�
 | `MULTICA_WORKSPACES_ROOT` | `~/multica_workspaces` | 执行工作目录的根目录 |
 | `MULTICA_AGENT_TEMP_BASE` | `/tmp`（Linux/macOS） | 仅适用于 Linux/macOS。每次运行的私有临时目录的父目录；必须是现有、可写的绝对路径，无效值会使运行启动失败，不会回退到 `/tmp`。请选择较短的路径——子工具可能会在其中绑定 AF_UNIX socket；Linux 的 `sun_path` 上限为 108 字节，macOS 为 104 字节 |
 
-守护进程注入智能体 task 的内部上下文见 [Task 运行时环境](/daemon-runtimes#task-运行时环境)。`MULTICA_REPO_CHECKOUT_MODE` 也属于这类变量：守护进程只在 Linux 和 Windows 的 Codex 运行中把它设为 `isolated`，不需要也无法手动配置。守护进程自身环境里的 `MULTICA_*` 变量不会传进运行。
+守护进程注入智能体 task 的内部上下文见 [Task 运行时环境](/daemon-runtimes#task-运行时环境)。`MULTICA_REPO_CHECKOUT_MODE` 也属于这类变量：守护进程只在 Linux 和 Windows 的 Codex 运行中把它设为 `isolated`，不需要也无法手动配置。守护进程自身环境里的 `MULTICA_*` 变量不会传进运行。`MULTICA_CLI_CALLER` 也由守护进程注入：它被设为拥有本次运行的 provider，供 CLI 发送 `X-Client-Caller`。但它只是普通环境变量，任何进程在任何 shell 里都能设置它，因此该值和其他自述标签一样不可信。
 
 优先级为命令行 flag → 环境变量 → `~/.multica/config.json` → 内置默认。watchdog 的行为见[守护进程与运行时](/daemon-runtimes)。
 

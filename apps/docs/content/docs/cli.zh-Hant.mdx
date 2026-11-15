@@ -465,6 +465,14 @@ CLI 配置檔案包含可代表你訪問 Multica 的令牌。不要提交到倉�
 
 它完全透過你已認證的 CLI 執行，本身不授予任何權限，權限仍然只來自你的登入、所選 profile 和工作區。要求 CLI 版本不低於 v0.4.26。該倉庫的 README 說明了 Claude Code 外掛市場、Codex skill 安裝器、Cursor 以及其他任何載入 Markdown 指令的工具的安裝方式。
 
+### 執行中的請求歸屬
+
+CLI 發出的每個請求都會帶 `X-Client-Platform`、`X-Client-Version` 和 `X-Client-OS`。在守護程序託管的執行中，還會帶 `X-Client-Caller`，值為擁有該執行的 provider（`<provider>`，已知本輪啟動二進位的版本時為 `<provider>/<version>`），入口或代理日誌可以藉此把請求歸因到「AI 代理在執行裡呼叫 CLI」，而不是「人在終端輸入命令」。伺服器目前不讀取該標頭，因此 API 日誌裡還無法區分這兩者。該值來自 `MULTICA_CLI_CALLER`：守護程序在啟動執行時設定它，終端沒有這個變數，因此不會傳送該標頭。該變數只是普通環境變數，任何程序在任何 shell 裡都能設定它，所以這個值不可信。
+
+CLI 有意讓 `User-Agent` 保持 Go 預設值，也不會改寫其他程式的 UA。`X-Client-Version` 才是 CLI 版本的事實來源，在 `User-Agent` 裡再放一份只會誘導下游去解析它。
+
+`X-Client-Caller` 是自述值：執行內的任何程序都能偽造它，也能直接設定該變數。它只能當作可觀測標籤，不能作為鑑權、配額、計費或歸屬判斷的依據；身分仍然來自 `mat_` 任務權杖。格式非法的值（控制字元、非 ASCII、超過 64 位元組）會被丟棄，而不會讓命令失敗。
+
 ## 接下來
 
 - [Multica CLI skill](https://github.com/multica-ai/multica-cli) — 在 Codex、Claude Code 或 Cursor 裡操作 Multica。

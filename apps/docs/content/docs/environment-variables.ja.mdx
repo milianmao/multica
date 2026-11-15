@@ -262,7 +262,7 @@ API key と base URL の両方が空の場合、このレイヤーは無効に�
 | `MULTICA_WORKSPACES_ROOT` | `~/multica_workspaces` | 実行用作業ディレクトリのルート |
 | `MULTICA_AGENT_TEMP_BASE` | `/tmp`（Linux/macOS） | Linux/macOS 専用。作業ごとのプライベート一時ディレクトリの親ディレクトリ。既存かつ書き込み可能な絶対パスである必要があり、無効な値の場合は `/tmp` にフォールバックせず作業の開始に失敗します。短いパスを選んでください。子ツールがその配下に AF_UNIX ソケットを作成する場合があり、`sun_path` の上限は Linux で 108 バイト、macOS で 104 バイトです |
 
-デーモンがエージェント作業に注入する内部コンテキストについては、[作業ランタイム環境](/daemon-runtimes#作業ランタイム環境)を参照してください。`MULTICA_REPO_CHECKOUT_MODE` もその一つです。デーモンは Linux と Windows の Codex 実行でだけ `isolated` を設定し、手動では設定できません。デーモン自身の環境にある `MULTICA_*` 変数は実行に引き継がれません。
+デーモンがエージェント作業に注入する内部コンテキストについては、[作業ランタイム環境](/daemon-runtimes#作業ランタイム環境)を参照してください。`MULTICA_REPO_CHECKOUT_MODE` もその一つです。デーモンは Linux と Windows の Codex 実行でだけ `isolated` を設定し、手動では設定できません。デーモン自身の環境にある `MULTICA_*` 変数は実行に引き継がれません。`MULTICA_CLI_CALLER` もデーモンが注入しますが、注意が必要です。デーモンが実行を所有する provider を設定し、CLI が `X-Client-Caller` を送れるようにしますが、これは通常の環境変数にすぎず、どのプロセスでもどのシェルでも設定できるため、値は他の自己申告ラベルと同様に信頼できません。
 
 優先順位はコマンドラインフラグ → 環境変数 → `~/.multica/config.json` → 組み込みデフォルトです。watchdog の動作は[デーモンとランタイム](/daemon-runtimes)を参照してください。
 
