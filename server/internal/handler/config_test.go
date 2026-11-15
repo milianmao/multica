@@ -481,6 +481,11 @@ func TestGetConfigExposesFrontendFeatureFlags(t *testing.T) {
 	if cfg.FeatureFlags["plugins_v1"] {
 		t.Fatalf("plugins_v1: want false by default, got true")
 	}
+	// ORIO-7's browser must ship dark: a client that reads this key as true
+	// before the desktop host exists would offer an entry with no window.
+	if cfg.FeatureFlags["qa_browser"] {
+		t.Fatalf("qa_browser: want false by default, got true")
+	}
 	for _, retired := range []string{"private_plugins_v1", "remote_mcp_plugins_v1"} {
 		if _, published := cfg.FeatureFlags[retired]; published {
 			t.Fatalf("retired Plugin sub-flag %q must not be published", retired)

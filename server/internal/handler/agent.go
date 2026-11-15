@@ -419,6 +419,11 @@ type AgentTaskResponse struct {
 	// disabling or uninstalling a plugin takes effect on the next task rather
 	// than whenever a daemon happens to restart.
 	PluginHookTools []service.PluginHookTool `json:"plugin_hook_tools,omitempty"`
+	// QABrowserTools tells the daemon to pre-inject the `multica-browser` MCP
+	// server for this task. It is a claim-time snapshot of the qa_browser
+	// feature flag, so turning the flag off stops new tasks immediately while
+	// an in-flight task keeps the tools it was started with (SDD §10).
+	QABrowserTools bool `json:"qa_browser_tools,omitempty"`
 	// RemoteMCPDaemonToken is a short-lived, workspace-and-daemon scoped
 	// credential used only by the local daemon's write-only Remote MCP broker.
 	// It is never injected into the agent process.

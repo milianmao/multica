@@ -53,12 +53,18 @@ const (
 	// projectWorkflowsCompat keeps workflow UI available in installed desktop
 	// clients that still gate it on this config decision and default to false.
 	projectWorkflowsCompat = "project_workflows_v1"
+	// QABrowser gates the QA built-in isolated browser (ORIO-7): the
+	// `multica-browser` MCP injection, the browser session endpoints and the
+	// issue sidebar card. Off by default, and all three gates read this one
+	// key so turning it off leaves no half-live surface behind.
+	QABrowser = "qa_browser"
 )
 
 var frontendPublicFlags = []string{
 	BillingWorkspaceSubscriptions,
 	ComposioMCPApps,
 	PluginsV1,
+	QABrowser,
 }
 
 func BillingWorkspaceSubscriptionsEnabled(ctx context.Context, flags *featureflag.Service) bool {
@@ -75,6 +81,11 @@ func PluginsV1Enabled(ctx context.Context, flags *featureflag.Service) bool {
 
 func TriageV1Enabled(ctx context.Context, flags *featureflag.Service) bool {
 	return flags.IsEnabled(ctx, TriageV1, false)
+}
+
+// QABrowserEnabled gates the QA built-in isolated browser.
+func QABrowserEnabled(ctx context.Context, flags *featureflag.Service) bool {
+	return flags.IsEnabled(ctx, QABrowser, false)
 }
 
 func LocalSearchIndexEnabled(ctx context.Context, flags *featureflag.Service) bool {
