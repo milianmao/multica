@@ -125,8 +125,11 @@ import { QuickActionsSection } from "./quick-actions-section";
 import { PluginPanelSection } from "../../plugins";
 import { PullRequestsSection } from "./pull-requests-section";
 import { IssueEnvironmentsSection } from "./issue-environments-section";
+import { IssueQaBrowserSection } from "./issue-qa-browser-section";
+import { createQaBrowserActions } from "../../platform/qa-browser";
 import { useGitHubSettings } from "@multica/core/github";
 import { useFeatureEnabled } from "@multica/core/config";
+import { QA_BROWSER_FLAG } from "@multica/core/feature-flags";
 import { PLUGINS_V1_FLAG } from "@multica/core/feature-flags";
 import { DeliverablesSection } from "./deliverables/deliverables-section";
 import { IssueAppsSection } from "./issue-apps-section";
@@ -1822,6 +1825,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   });
 
   const { data: commentTasks, isLoading: commentTasksLoading } = useQuery(issueTasksOptions(id));
+  // QA browser (ORIO-7) — off by default; the section renders only for a build
+  // the server has enabled, and the task id scopes the session to one run.
+  const qaBrowserEnabled = useFeatureEnabled(QA_BROWSER_FLAG, false);
+  const qaBrowserActions = useMemo(() => createQaBrowserActions(), []);
+  const qaBrowserTaskId = useMemo(
+    () => commentTasks?.find((task) => task.status === "running")?.id ?? commentTasks?.[0]?.id ?? null,
+    [commentTasks],
+  );
   const enteringRunIds = useNewRunIds(id, commentTasks);
   const previousCommentRuns = useRef(new Map<string, CommentRun[]>());
   const { runs: commentRuns, timeline: displayTimeline, standaloneRuns } = useMemo(() => {
@@ -3304,6 +3315,11 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     ),
     // Environments the issue's runs left running, and the "+" that starts one.
     environments: <IssueEnvironmentsSection issueId={id} assigneeType={issue.assignee_type} assigneeId={issue.assignee_id} />,
+    // QA browser — a host the QA agent and a person share. Hidden entirely
+    // when the flag is off, so rollback leaves no entry that cannot work.
+    qa_browser: qaBrowserEnabled ? (
+      <IssueQaBrowserSection issueId={id} taskId={qaBrowserTaskId} actions={qaBrowserActions} />
+    ) : null,
     // Deliverables — the files this issue's comments delivered. Hidden
     // while there are none.
     deliverables: (

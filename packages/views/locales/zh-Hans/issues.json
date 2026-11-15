@@ -1974,5 +1974,27 @@
     "focus_failed": "无法切到 {{name}}",
     "retry": "重试",
     "dismiss": "忽略"
+  },
+  "qa_browser": {
+    "section_title": "QA 浏览器",
+    "loading": "正在读取状态…",
+    "not_opened": "尚未打开浏览器会话",
+    "capability_none": "本次运行的 Agent 无法驱动浏览器，只有支持 HTTP MCP 的 Agent 可以，因此没有可打开的入口。",
+    "no_page": "尚未加载页面",
+    "locked_by_you": "你正在操作",
+    "desktop_offline": "Multica Desktop 未运行，没有可承载该会话的窗口。",
+    "last_evidence": "最近截图于 {{time}}",
+    "takeover": "接管",
+    "release": "交还",
+    "open_window": "显示窗口",
+    "capture": "截图",
+    "state": {
+      "requested": "启动中",
+      "hosted": "运行中",
+      "orphaned": "Desktop 失联",
+      "closing": "关闭中",
+      "closed": "已结束",
+      "failed": "失败"
+    }
   }
 }

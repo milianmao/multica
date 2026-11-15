@@ -1974,5 +1974,27 @@
     "focus_failed": "無法切到 {{name}}",
     "retry": "重試",
     "dismiss": "忽略"
+  },
+  "qa_browser": {
+    "section_title": "QA 瀏覽器",
+    "loading": "正在讀取狀態…",
+    "not_opened": "尚未開啟瀏覽器工作階段",
+    "capability_none": "本次執行的 Agent 無法驅動瀏覽器，只有支援 HTTP MCP 的 Agent 可以，因此沒有可開啟的入口。",
+    "no_page": "尚未載入頁面",
+    "locked_by_you": "你正在操作",
+    "desktop_offline": "Multica Desktop 未執行，沒有可承載此工作階段的視窗。",
+    "last_evidence": "最近截圖於 {{time}}",
+    "takeover": "接管",
+    "release": "交還",
+    "open_window": "顯示視窗",
+    "capture": "截圖",
+    "state": {
+      "requested": "啟動中",
+      "hosted": "執行中",
+      "orphaned": "Desktop 中斷連線",
+      "closing": "關閉中",
+      "closed": "已結束",
+      "failed": "失敗"
+    }
   }
 }
