@@ -414,12 +414,16 @@ P3 越界的具体表现要一并写进 A1：若 agent 启动或后台恢复时�
 
 ### 13.1 host 平面新增 `POST /browser/host/session`
 
-§3.2 只有 task 平面能创建 session（`POST /browser/session`，凭 task token）。但侧栏状态卡由人点击"打开"，Desktop main 手里**没有 task token**——它只有 host secret。缺这个方法时，人无法为已结束的运行打开浏览器，只能等 agent 先调用工具。
+§3.2 只有 task 平面能创建 session（`POST /browser/session`，凭 task token）。但侧栏状态卡由人点击"打开"，Desktop main 手里**没有 task token**——它只有 host secret。
 
 - 凭据：host secret
 - body：`task_id`（必填）、`issue_id`、`workspace_id`、`agent_id`
+- `task_id` 必须匹配 `^[A-Za-z0-9_-]{1,128}$`，否则 **400**，不进 registry
+- task 必须**是本 daemon 正在运行的**（claim 期已记录 capability），否则 **404**。host 平面只能确认 task，不能凭空声明一个
 - 语义：幂等创建或取回该 task 的 session，与 task 平面的创建共用同一个 registry 条目
 - 响应：`{"code":"OK","session":{...}}`
+
+> 安全复核 P0-1/P1-3 后收紧：原实现接受任意 `task_id` 并默认给 `capability=full`，使 session 的 `TaskID` 变成"调用方声明值"。
 
 ### 13.2 host 平面新增 `GET /browser/host/sessions`
 
@@ -433,6 +437,46 @@ Desktop 启动或恢复后需要知道"这台机器上还有哪些 session 没�
 
 `POST /browser/session` 的 body 被接受但**忽略**：`capability` 只来自 daemon 记录的 provider 判定（`providerSupportsRemoteMCPBroker`）。若允许调用方声明 `full`，一个无法承载 HTTP MCP 的 provider 就会拿到一个"入口可点、工具不存在"的 session——正是 §8 第 3 条要消除的静默失败。
 
-### 13.4 侧栏入口的渲染条件
+### 13.4 清理不删目录（P1-4 拍板的最小方案）
+
+QA view 的 partition 是**非持久**的（`qa-task-<hash>`，无 `persist:` 前缀），Chromium 把 Cookie/localStorage 留在进程内，**不会写 profile 目录**。所以 daemon 侧原本的 `os.RemoveAll(HostProfileDir)` 删的是一个从不存在的目录：它不带来隔离（A2 由 partition 名保证），只带来 P0-1 那条任意路径删除。
+
+据此**删掉整条目录清理路径**：
+
+- `register` 不再接受 `profile_dir`（该字段唯一的用途就是给删除提供输入）；
+- registry 不再持有目录，`cleanupLocked` 只做终结；
+- 重试队列与 `RemoveAll` 一并移除；
+- A6 的口径改为「view 已销毁 + registry 已清空 + 无残留进程」，不再是「目录消失」。
+
+将来若要支持持久化 partition，必须重新引入目录所有权，并同时落地标识符校验、哈希化命名与受管根前缀校验。
+
+### 13.5 `capability` 的默认值
+
+未被 claim 记录 decision 的 task 一律 `capability=none`（原为 `full`）。理由是 task 平面越权拦截断言的是 `session.TaskID == token 的 task_id`，若 host 平面能手造任意 task 的 session，"声明值"就会顶替"确认值"。本轮不引入 `observe` 语义；将来要支持已结束运行的只读观察，须单独立项。
+
+### 13.6 `browser_screenshot` 是真实动作
+
+`browser_screenshot` 在 Desktop `execute()` 里有独立分支：`capturePage()` → 4 MiB 产物上限（main 侧判定，超限不发请求）→ `POST /browser/host/evidence` → 返回 attachment id。它是 A4 唯一的自动化证据来源，不是侧栏按钮的别名。
+
+### 13.7 侧栏入口的渲染条件
 
 `qa_browser` 是前端公开 flag（`server/internal/featureflags` 的 `frontendPublicFlags` + `packages/core/feature-flags` 的 `QA_BROWSER_FLAG`）。关闭时侧栏整段不渲染；`capability=none` 时按 P2 渲染**置灰并说明原因**的入口。两者不同：前者是发布开关，后者是单次运行的固有限制。
+
+Desktop main **不读这个 flag**：它没有 server session，拿不到决定。因此 main 侧始终安装 IPC 与宿主；无 session 时不建 view、不轮询、无命令，空闲成本是一个已注册的 IPC 面。这一点已写进 `qa-browser-setup.ts` 的注释，取代此前"main 也被 flag 门控"的错误说法。
+
+### 13.8 导航与 task 终态（P2-6/P2-7）
+
+- QA view 除 `setWindowOpenHandler` 外，还装 `will-navigate` 与 `will-redirect`：非 `http`/`https` 一律 `preventDefault()`。缺这两个钩子时，页面自己跳到 `file://` 会渲染本机文件，再被证据截图传进 issue。
+- task 调用 `runTask` 的 defer 关闭本 task 的 session：task 终态时 agent 进程已退出、token 已回收，没人能再发 `DELETE`，只靠 idle TTL 会让窗口多活最多 15 分钟。
+
+### 13.9 残余风险（返修后）
+
+| # | 风险 | owner | 状态 |
+|---|---|---|---|
+| V1 | 仓库实际 Electron 44.9.x 上的行为未验证 | 研发 | 阶段 7 harness 已在真实 Electron 上跑通一次（见 issue 证据），但未覆盖多窗口与长时间运行 |
+| V3 | 窗口**最小化**（非 hide）时 view 与截图行为 | 研发 | 未验证 |
+| V4 | 真实业务页面的 a11y 树规模与 ref 解析开销 | QA | 未验证，需真实验收环境 |
+| V5 | `render-process-gone` 后的 view 重建语义 | 研发 | 单测覆盖"view_alive=false → orphaned"，真实崩溃未验证 |
+| V6 | 持久化 partition 的目录所有权 | 研发 | 本轮明确不做；若将来做，见 §13.4 末段 |
+| V9 | 侧栏最近截图是否直连 attachment URL | 前端 | 未定，按既有 `useDownloadAttachment` 取值 |
+| V10 | `browser_wait` 的 condition 在被测页面内求值 | 安全 | 已评估：agent 自己给的表达式，运行于被测页面上下文，不触及本机权限 |
