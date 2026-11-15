@@ -72,6 +72,8 @@ export type QaBrowserWindow = {
   focus(): void;
   destroy(): void;
   isDestroyed(): boolean;
+  /** Fired when the user closes the window; used to drop the cached entry. */
+  on?(event: "closed", listener: () => void): unknown;
   webContents: { id: number };
 };
 
@@ -201,7 +203,20 @@ export class QaBrowserHost {
    */
   ensure(input: { sessionId: string; taskId: string; issueId: string; partition: string }): QaBrowserHostEntry {
     const existing = this.entries.get(input.sessionId);
-    if (existing) return existing;
+    if (existing) {
+      // A cached entry whose view is gone is not reusable: the user closed the
+      // QA window, or the renderer crashed. Returning it made "open browser"
+      // hand back a dead view forever, and the daemon kept seeing
+      // `view_alive: false` from a session whose window nobody could reach.
+      // Drop it and build a fresh one below.
+      if (!existing.view.webContents.isDestroyed()) return existing;
+      this.entries.delete(input.sessionId);
+      try {
+        if (!existing.window.isDestroyed()) existing.window.destroy();
+      } catch {
+        // Already gone; the map entry is what mattered.
+      }
+    }
 
     const window = this.adapters.createWindow({
       title: `QA · ${input.issueId}`,
@@ -251,6 +266,14 @@ export class QaBrowserHost {
       executed: 0,
       console: [],
     };
+    // The window can be closed by the user at any time, and that path does not
+    // go through the Multica windows' handlers. Without this listener the entry
+    // outlives its window and the heartbeat loop reports a dead view forever.
+    window.on?.("closed", () => {
+      const current = this.entries.get(input.sessionId);
+      if (current === entry) this.entries.delete(input.sessionId);
+    });
+
     this.entries.set(input.sessionId, entry);
     return entry;
   }
@@ -668,13 +691,18 @@ export class QaBrowserHost {
     timeoutMs: number,
   ): Promise<QaBrowserHostCommandResult> {
     const deadline = Date.now() + Math.max(0, Math.min(timeoutMs, 30_000));
-    let last: unknown;
     while (Date.now() < deadline) {
-      last = await this.evaluate(sessionId, `Boolean(${condition})`);
-      if (last === true) return { id, ok: true, text: "condition met" };
+      if ((await this.evaluate(sessionId, `Boolean(${condition})`)) === true) {
+        return { id, ok: true, text: "condition met" };
+      }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return { id, ok: false, error: `condition not met before the timeout (last=${String(last)})` };
+    // The failing predicate's last value is deliberately NOT included. It is
+    // page-derived data, it tells a human nothing they cannot read from the
+    // condition itself, and `Boolean(...)` only keeps it harmless by accident:
+    // the day this returns the raw value, page content would flow into an error
+    // string. Dropping it removes the question rather than guarding it.
+    return { id, ok: false, error: "condition not met before the timeout" };
   }
 }
 

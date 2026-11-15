@@ -243,7 +243,9 @@ app.whenReady().then(async () => {
       },
       executeCommands: (sid, commands) => Promise.all(commands.map((command) => host.execute(sid, command))),
       onDaemonLost: () => {},
-      intervalMs: 2000,
+      // Deliberately the shipped default: passing an override here would
+      // decouple the soak from the constant it is supposed to guard.
+      intervalMs: undefined,
     });
     const SOAK_MS = 60_000;
     const started = Date.now();

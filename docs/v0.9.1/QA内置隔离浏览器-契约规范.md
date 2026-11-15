@@ -527,6 +527,10 @@ Desktop 侧另有 `qa-browser-redact.ts` 做同一子集：daemon 是权威脱�
 
 现在 harness 显式跑真实心跳循环 ≥60s（12 次采样）并断言 `state=hosted`。**但它的范围仍然有限**：不覆盖多窗口、最小化、进程崩溃重建、真实 a11y 规模。任何引用"harness 通过"的地方都必须指明它证明的是哪一段，否则它会持续为未验证部分提供虚假信心。
 
+**第二轮的这个断言当时是空的（第三轮复核指出，已修）**：harness daemon 从不启动 sweeper。`sweep()` 是唯一的时间驱动状态写入者，产品在 `Run` 里启动它，而 harness 不走 `Run`——所以"60s 后仍 hosted"在**任何**实现下都为真，包括那个必然 orphaned 的版本。也就是说第二轮把它当作 P0-1 的验收证据是错的：它证明的是"Desktop 心跳循环能与 daemon 通信 60 秒"，仅此而已。
+
+修正后：harness daemon 调 `StartBrowserHarnessSweeper(ctx, 1s)`；且 harness 不再用 `intervalMs` 覆盖心跳间隔（覆盖会让 soak 与实际常量脱钩）。**有效性由对照实验证明**：把 poll/tick/timeout 三个常量退回旧值（10s/5s/10s）并停用 `touchHost`，同一断言在第 4 次采样（约 20s）即 FAIL，`finalState=orphaned`；恢复后 PASS。不会 FAIL 的断言不算门禁，这一条要作为新增断言的门槛。
+
 ### 14.7 R3 已用真实 server 关闭
 
 不再用注入的 in-memory sink 代替。新增 opt-in 测试 `TestBrowserRealServerAttachment`，以 daemon 自身凭据调用生产 `uploadIssueEvidence`：
@@ -551,3 +555,69 @@ MULTICA_RUN_REAL_ATTACHMENT_SMOKE=1 MULTICA_SMOKE_ISSUE=... MULTICA_SMOKE_WORKSP
 | V11 | 被 `will-navigate` 拦下后 renderer 停留中间态，同 view 紧接着 `loadURL` 可能卡住 | 研发 | 产品路径（一次 goto 一次截图）不受影响；已把 harness 的导航断言放最后 |
 | V12 | harness 覆盖范围有限（见 §14.6） | 研发/QA | 引用时必须限定 |
 | V13 | A1/A3/A4/A7 人工验收 | QA | 未执行；A3 在 §14.5 修复后具备执行条件 |
+
+## 15. 第三轮复核（P1-10 + P2-9/11/12/13）
+
+### 15.1 P1-10 `viewAlive=false` 的会话不再续命
+
+第二轮修完 P0-1（心跳刷新 idle）与 P1-3（`closing` 有出口）之后，暴露出第三条路径：**视图永久死亡但 Desktop 仍在心跳**。
+
+- `heartbeat()` 收到 `viewAlive=false` 后置 `orphaned`，但**继续往下走** `touchLocked`，于是 idle 每 6 秒被推后 15 分钟；
+- `orphaned` 没有自己的时间驱动出口（P1-3 的 `closingAckTimeout` 只作用于 `closing`）；
+- Desktop `ensure()` 命中缓存条目时**不检查 view 是否已销毁**，"打开"永远拿到死条目；
+- QA 窗口自身的 `closed` 没有监听（只有 Multica 主窗口与独立 issue 窗口有）。
+
+后果：用户关掉的浏览器，其 registry 条目与 partition 永不释放；点"打开"会在 `hosted`/`orphaned` 之间来回弹，而工具始终 `BROWSER_SESSION_UNAVAILABLE`。
+
+修法（三条缺一不可）：
+
+1. `heartbeat()` 在 `!viewAlive` 时**不走** `touchLocked`；
+2. `hosted`/`orphaned` 且 `viewAlive=false` 的会话直接进 `closing` → `cleanupLocked`。**理由**：心跳报告视图死亡本身就是 phase-two 证据——host 已经说明视图没了，这正是 ack 要确立的事实，所以不必再等 ack；
+3. Desktop `ensure()` 命中已销毁 view 时移除条目并重建；QA 窗口 `on("closed")` 时丢弃条目。
+
+### 15.2 P2-9 harness 断言的有效性（见 §14.6 末段）
+
+新增 `StartBrowserHarnessSweeper` 与对照实验。**这是本轮最重要的一条**：没有对照实验，断言的有效性只能靠信。
+
+### 15.3 P2-11 错误路径与误报
+
+- `writeToolError` 现在按工具名分流：console 类错误也走 `ConsoleText`。此前错误路径用较弱的 `Text`，与成功路径不一致；`browser_wait` 的超时信息原本带着谓词的 `last` 值（页面数据），只因为外面套了 `Boolean(...)` 才偶然安全。
+- `browser_wait` 的 `last` 已从错误信息中**删除**：它对人类排查无用，对泄露有用。删掉问题比守住它更可靠。
+- `ConsoleText` 裸 `name=value` 的 name 白名单收紧为 `sid|session|sess|token|auth|access|refresh|csrf|xsrf`，去掉泛化的 `id`。原规则会把 `element id=submitButton12` 改写成 `element id=[REDACTED COOKIE]`——不是泄露，但让 console dump 失去可读性。
+
+### 15.4 P2-12 双实现必须同步（检查清单）
+
+console 脱敏有两份实现，**刻意不共享代码**（Go/TS、daemon/main 两个进程，跨语言共享正则的代价高于收益）。改动必须成对：
+
+| 规则 | daemon（权威） | Desktop（同源子集） |
+|---|---|---|
+| Cookie 头（含引号/制表符形态） | `server/pkg/redact/redact.go` `COOKIE_HEADER` 系列 | `apps/desktop/src/main/qa-browser-redact.ts` `COOKIE_HEADER` / `COOKIE_HEADER_SPACE` |
+| 裸 `name=value` 的 name 白名单 | 同上 `cookiePairPattern` | 同上 `SESSION_PAIR` |
+| 值的"不透明标识"判定 | 同上 `looksLikeSessionValue` / `isHexRun` | 同上 `looksLikeSessionValue` |
+| bearer / `mat_` | `Text` 的对应规则 | `BEARER` / `TASK_TOKEN` |
+
+**检查项**：任何改动上表左列的行为都必须同步右列，并在同一个 PR 里；两侧注释已互相指向对方文件与本表。新增规则若只对 daemon 有意义（例如覆盖 transcript 的更宽模式），必须在右列注释里写明"Desktop 不需要"，否则下一个人无法判断是遗漏还是有意。
+
+### 15.5 P2-13 `/shutdown` 与 QA 浏览器的组合风险（未修，须在 QA 前处理）
+
+`server/internal/daemon/health.go` 的 `/shutdown` 只校验 method，没有 Origin / JSON 校验，而它与 QA 浏览器的 host 平面同处 `serveHealth` 的 mux。QA 浏览器的用途就是**故意打开任意被测页面**，所以"被测页面能 POST 关停本机 daemon"这条组合风险是真实的，不是理论。
+
+- **owner**：研发工程师
+- **时间窗**：ORIO-7 进入 QA 前必须修复；或由 owner 明确书面接受风险并在 QA 用例里加一条负向验证
+- **当前缓解**：`qa_browser` feature flag 默认关闭，关闭期间不打开任何被测页面；**这条缓解只在默认配置下成立**，任何环境启用 `qa_browser` 之前必须先修 `/shutdown`
+- **修复时注意兼容**：`multica daemon stop` 发的是无 body、无 Content-Type 的 POST，加 Origin/JSON 校验时必须同时放过这条合法调用（规划师早前 comment 已标注此坑）
+- 本轮**不**把 `/shutdown` 改造塞进功能返修（遵守"另开 issue"边界），但**不允许静默保留**——已记入 §15.6 残余风险表。
+
+### 15.6 第三轮后残余风险
+
+| # | 风险 | owner | 时间窗 |
+|---|---|---|---|
+| V3 | 窗口最小化时 view 与截图行为 | 研发 | 未验证 |
+| V4 | 真实业务页面 a11y 规模与 ref 解析开销 | QA | 需真实验收环境 |
+| V5 | `render-process-gone` 后的 view 重建 | 研发 | 单测覆盖状态迁移，真实崩溃未验证 |
+| V6 | 持久化 partition 的目录所有权 | 研发 | 本轮不做 |
+| V9 | 侧栏最近截图是否直连 attachment URL | 前端 | 未定 |
+| V11 | 被 `will-navigate` 拦下后 renderer 停留中间态 | 研发 | 产品路径不受影响 |
+| V12 | harness 覆盖范围有限（见 §14.6） | 研发/QA | 引用时必须限定 |
+| V13 | A1/A3/A4/A7 人工验收 | QA | 未执行；A3 已具备执行条件 |
+| **V14** | **`/shutdown` 无 Origin/JSON 校验，与启用 `qa_browser` 的环境组合可被被测页面关停 daemon** | **研发** | **ORIO-7 进入 QA 前**（见 §15.5） |

@@ -38,6 +38,22 @@ describe("redactConsoleText", () => {
     expect(out).not.toContain("mat_abcdefghijklmnopqrstuvwxyz012345");
   });
 
+  it("leaves ordinary element ids alone", () => {
+    // P2-11: a bare `id` name matched markup and rewrote a readable element id.
+    for (const input of ["element id=submitButton12", "<div id=mainContent42>"]) {
+      expect(redactConsoleText(input)).toBe(input);
+    }
+  });
+
+  it("still redacts the session-shaped names", () => {
+    for (const [input, leak] of [
+      ["csrf=Xk9f2LmQ7pR4tW1s", "Xk9f2LmQ7pR4tW1s"],
+      ["xsrf_token=Ab3dE6gH9jK2mN5p", "Ab3dE6gH9jK2mN5p"],
+    ]) {
+      expect(redactConsoleText(input)).not.toContain(leak);
+    }
+  });
+
   it("leaves readable prose alone", () => {
     // A redactor that mangles ordinary text gets disabled, and then it protects
     // nothing. `session=failed` is prose, not a credential.

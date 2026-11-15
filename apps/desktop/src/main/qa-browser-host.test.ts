@@ -32,6 +32,8 @@ type Listener = (...args: unknown[]) => void;
 interface FakeView {
   webContents: {
     id: number;
+    /** Test hook: model a window the user closed. */
+    __destroy: () => void;
     loadURL: ReturnType<typeof vi.fn>;
     getURL: () => string;
     isDestroyed: () => boolean;
@@ -70,13 +72,18 @@ function fakeView(id = 1): FakeView {
   });
   const listeners: Record<string, Listener[]> = {};
   let attached = false;
+  let destroyed = false;
   return {
     webContents: {
       id,
       __listeners: listeners,
+      // Tests flip this to model a window the user closed.
+      __destroy: () => {
+        destroyed = true;
+      },
       loadURL: vi.fn(async () => undefined),
       getURL: () => "http://127.0.0.1:3000/dashboard?token=secret",
-      isDestroyed: () => false,
+      isDestroyed: () => destroyed,
       getZoomFactor: () => 1,
       capturePage: vi.fn(async () => ({
         toPNG: () => Buffer.from("png"),
@@ -117,6 +124,8 @@ interface FakeWindow {
   focus: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
   isDestroyed: () => boolean;
+  on: (event: string, listener: () => void) => unknown;
+  __close: () => void;
   webContents: { id: number };
 }
 
@@ -124,6 +133,7 @@ const WORK_AREA = { x: 0, y: 0, width: 1920, height: 1032 };
 
 function fakeWindow(overrides: Partial<FakeWindow> = {}): FakeWindow {
   let pos = { x: -20000, y: -20000 };
+  const closedListeners: (() => void)[] = [];
   return {
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     getContentBounds: () => ({ x: 0, y: 0, width: 1200, height: 900 }),
@@ -137,6 +147,14 @@ function fakeWindow(overrides: Partial<FakeWindow> = {}): FakeWindow {
     focus: vi.fn(),
     destroy: vi.fn(),
     isDestroyed: () => false,
+    // The user closing the QA window fires this; the host must drop its entry.
+    on: (event: string, listener: () => void) => {
+      if (event === "closed") closedListeners.push(listener);
+      return undefined;
+    },
+    __close: () => {
+      for (const listener of closedListeners) listener();
+    },
     webContents: { id: 9 },
     ...overrides,
   };
@@ -467,6 +485,49 @@ describe("QaBrowserHost", () => {
     expect(result.text).not.toContain("abc123def456");
     expect(result.text).not.toContain("SECRETVALUE0123456789");
     expect(result.text).toContain("[REDACTED COOKIE]");
+  });
+
+  it("rebuilds instead of reusing an entry whose view was destroyed", () => {
+    // P1-10: the user closed the QA window. `ensure` used to return the cached
+    // entry, so "open browser" handed back a dead view forever while the daemon
+    // saw view_alive=false on every heartbeat.
+    const { views, windows, host } = makeHost();
+    const first = host.ensure(SESSION);
+    (first.view.webContents as unknown as { __destroy: () => void }).__destroy();
+
+    const second = host.ensure(SESSION);
+
+    expect(views).toHaveLength(2);
+    expect(windows).toHaveLength(2);
+    expect(second.view.webContents.id).not.toBe(first.view.webContents.id);
+    expect(windows[0]!.destroy).toHaveBeenCalled();
+  });
+
+  it("drops its entry when the user closes the QA window", () => {
+    // P1-10: the QA window's own close path is not one of the Multica window
+    // handlers, so without this listener the entry outlived its window.
+    const { windows, host } = makeHost();
+    host.ensure(SESSION);
+    expect(host.has("bs_1")).toBe(true);
+
+    windows[0]!.__close();
+
+    expect(host.has("bs_1")).toBe(false);
+  });
+
+  it("drops the page's last value from a wait timeout", async () => {
+    // P2-11: the failing predicate's value is page data with no diagnostic
+    // value, and `Boolean(...)` only kept it harmless by accident.
+    const { host } = makeHost({ sendCommand: (method) => method === "Runtime.evaluate" ? { result: { value: false } } : {} });
+    host.ensure(SESSION);
+    const result = await host.execute("bs_1", {
+      id: "c1",
+      action: "browser_wait",
+      params: { condition: "document.title === 'x'", timeout_ms: 1 },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("condition not met before the timeout");
+    expect(result.error).not.toContain("last=");
   });
 
   it("drops the query string from a reported URL", () => {

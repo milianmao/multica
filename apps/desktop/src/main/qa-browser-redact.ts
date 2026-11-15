@@ -8,6 +8,14 @@
  * crash dump before it is ever sent, and a credential in a crash dump is just as
  * leaked as one in a comment.
  *
+ * TWIN IMPLEMENTATION: server/pkg/redact/redact.go (`ConsoleText`), which is
+ * the authoritative pass. This file is the narrower Desktop-side copy.
+ *
+ * They are separate on purpose (Go vs TypeScript, daemon vs main process), so
+ * they are kept in step by hand. Changing COOKIE_HEADER, COOKIE_HEADER_SPACE,
+ * SESSION_PAIR or `looksLikeSessionValue` HERE requires the same change THERE.
+ * SDD §14.9 lists the pairs that must move together.
+ *
  * The rule set is deliberately the console subset, not a general-purpose copy:
  * cookie headers, session pairs (`document.cookie` prints bare `name=value`),
  * bearer tokens and `mat_` task tokens. Anything broader belongs in the daemon,
@@ -18,7 +26,11 @@
 const COOKIE_HEADER = /\b(Set-Cookie|Cookie)["']?[ \t]*[:=][^\r\n]*/gi;
 const COOKIE_HEADER_SPACE = /\b(Set-Cookie|Cookie)[ \t]+([A-Za-z0-9_.~-]+=)[^\r\n]*/gi;
 /** Bare `name=value`, the shape `document.cookie` prints. */
-const SESSION_PAIR = /\b((?:sid|session|sess|auth|access|refresh|id)[A-Za-z0-9_.-]*)[ \t]*=[ \t]*([A-Za-z0-9._~+/%-]+)/gi;
+// Mirrors server/pkg/redact/redact.go's cookiePairPattern. The name whitelist
+// stops at session-shaped names on purpose: a bare `id` also matches ordinary
+// markup in a console dump (`element id=submitButton12`), and rewriting a
+// readable element id into a redaction marker makes the log useless.
+const SESSION_PAIR = /\b((?:sid|session|sess|token|auth|access|refresh|csrf|xsrf)[A-Za-z0-9_.-]*)[ \t]*=[ \t]*([A-Za-z0-9._~+/%-]+)/gi;
 const BEARER = /\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi;
 const TASK_TOKEN = /\bmat_[A-Za-z0-9_-]{20,}/g;
 
