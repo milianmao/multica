@@ -115,7 +115,7 @@ export function registerQaBrowserIpc(deps: QaBrowserDeps): () => void {
       return failure(opened.reason === "session_ended" ? "session_ended" : "daemon_unavailable");
     }
 
-    const entry = host.ensure({
+    host.ensure({
       sessionId: opened.session.session_id,
       taskId: parsed.taskId,
       issueId: parsed.issueId,
@@ -127,9 +127,8 @@ export function registerQaBrowserIpc(deps: QaBrowserDeps): () => void {
       sessionId: opened.session.session_id,
       taskId: parsed.taskId,
       windowId: String(window.id),
-      // The daemon deletes exactly this directory on cleanup, and validates
-      // that its leaf is this session's partition.
-      profileDir: entry.profileDir,
+      // No directory is reported: the partition is non-persistent and the
+      // daemon owns no path, so there is nothing for it to delete.
       cdpReady: true,
     });
     if (!registered.ok) {

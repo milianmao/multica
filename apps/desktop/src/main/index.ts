@@ -644,6 +644,11 @@ function createIssueWindow(context: IssueWindowContext): void {
   window.on("closed", () => {
     issueWindows.delete(window);
     authSessionCoordinator.unregisterIssueWindow(window);
+    // The sidebar card can open a browser from a dedicated issue window too,
+    // so this path owes the same teardown as a main window: without it the view
+    // would outlive its window and wait out the idle TTL.
+    const qaBrowserHost = qaBrowserHostOrNull();
+    if (qaBrowserHost) forgetQaBrowserWindow(window.id, qaBrowserHost);
   });
 
   window.on("ready-to-show", () => window.show());

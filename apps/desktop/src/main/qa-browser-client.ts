@@ -139,7 +139,6 @@ export function registerQaBrowserHost(
     sessionId: string;
     taskId: string;
     windowId: string;
-    profileDir: string;
     cdpReady: boolean;
   },
 ): Promise<QaBrowserHostResult> {
@@ -149,7 +148,6 @@ export function registerQaBrowserHost(
       session_id: request.sessionId,
       task_id: request.taskId,
       window_id: request.windowId,
-      profile_dir: request.profileDir,
       cdp_ready: request.cdpReady,
     },
   });

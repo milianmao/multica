@@ -12,8 +12,6 @@ import { describe, expect, it, vi } from "vitest";
  * the alias in vitest.config.ts would otherwise throw on import.
  */
 
-const removeMock = vi.hoisted(() => ({ calls: [] as string[], fail: false }));
-
 vi.mock("electron", () => ({
   BaseWindow: class {},
   WebContentsView: class {},
@@ -40,6 +38,8 @@ interface FakeView {
     getZoomFactor: () => number;
     capturePage: ReturnType<typeof vi.fn>;
     on: (event: string, listener: Listener) => unknown;
+    /** Listeners the host registered, keyed by event name. */
+    __listeners: Record<string, Listener[]>;
     setWindowOpenHandler: ReturnType<typeof vi.fn>;
     session: { setPermissionRequestHandler: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn> };
     debugger: {
@@ -68,9 +68,11 @@ function fakeView(id = 1): FakeView {
     if (method === "Runtime.evaluate") return { result: { value: { ok: true, x: 10, y: 20 } } };
     return {};
   });
+  const listeners: Record<string, Listener[]> = {};
   return {
     webContents: {
       id,
+      __listeners: listeners,
       loadURL: vi.fn(async () => undefined),
       getURL: () => "http://127.0.0.1:3000/dashboard?token=secret",
       isDestroyed: () => false,
@@ -79,7 +81,10 @@ function fakeView(id = 1): FakeView {
         toPNG: () => Buffer.from("png"),
         isEmpty: () => false,
       })),
-      on: () => undefined,
+      on: (event: string, listener: Listener) => {
+        listeners[event] = [...(listeners[event] ?? []), listener];
+        return undefined;
+      },
       setWindowOpenHandler: vi.fn(),
       session: { setPermissionRequestHandler: vi.fn(), on: vi.fn() },
       debugger: {
@@ -100,6 +105,8 @@ interface FakeWindow {
   getContentBounds: () => { x: number; y: number; width: number; height: number };
   isMinimized: () => boolean;
   show: ReturnType<typeof vi.fn>;
+  showInactive: ReturnType<typeof vi.fn>;
+  setPosition: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
   isDestroyed: () => boolean;
@@ -112,6 +119,8 @@ function fakeWindow(overrides: Partial<FakeWindow> = {}): FakeWindow {
     getContentBounds: () => ({ x: 0, y: 0, width: 1200, height: 900 }),
     isMinimized: () => false,
     show: vi.fn(),
+    showInactive: vi.fn(),
+    setPosition: vi.fn(),
     focus: vi.fn(),
     destroy: vi.fn(),
     isDestroyed: () => false,
@@ -135,11 +144,6 @@ function makeHost(options: { sendCommand?: (method: string) => Record<string, un
       views.push(view);
       return view;
     },
-    partitionDirFor: (_sessionId: string, partition: string) => `/tmp/multica-qa-browser/${partition}`,
-    removePartitionDir: (dir: string) => {
-      if (removeMock.fail) throw new Error("EBUSY");
-      removeMock.calls.push(dir);
-    },
   };
   return { adapters, views, windows, host: new QaBrowserHost(asAdapters(adapters)) };
 }
@@ -158,10 +162,35 @@ describe("QaBrowserHost", () => {
     expect(second.view.webContents.id).toBe(first.view.webContents.id);
   });
 
-  it("never shows the window on creation, only when raised", () => {
+  it("takes a capture surface off-screen without stealing focus (P3 + I5)", () => {
+    const created: unknown[] = [];
+    const windows: FakeWindow[] = [];
+    const host = new QaBrowserHost(
+      asAdapters({
+        createWindow: (options: unknown) => {
+          created.push(options);
+          const window = fakeWindow();
+          windows.push(window);
+          return window;
+        },
+        createView: () => fakeView(1),
+      }),
+    );
+    host.ensure(SESSION);
+
+    // Measured on Electron 44.9.3: a never-shown window cannot capture at all
+    // ("Current display surface not available"), so creation must produce a
+    // surface — off-screen, without activation, and off the taskbar.
+    expect(created[0]).toMatchObject({ show: false, x: -20000, y: -20000, skipTaskbar: true });
+    expect(windows[0]!.showInactive).toHaveBeenCalledTimes(1);
+    // P3 still holds: nothing activates and nothing is raised.
+    expect(windows[0]!.show).not.toHaveBeenCalled();
+    expect(windows[0]!.focus).not.toHaveBeenCalled();
+  });
+
+  it("raises the window only on an explicit takeover", () => {
     const { windows, host } = makeHost();
     host.ensure(SESSION);
-    // P3: an agent start must not steal focus.
     expect(windows[0]!.show).not.toHaveBeenCalled();
 
     expect(host.raise("bs_1")).toBe(true);
@@ -215,28 +244,23 @@ describe("QaBrowserHost", () => {
     expect(await host.capture("bs_1", 1)).toEqual({ tooLarge: 3 });
   });
 
-  it("destroys the view before deleting its partition directory", () => {
+  it("destroys the view and the window, and touches no filesystem path", () => {
     const { windows, host } = makeHost();
     host.ensure(SESSION);
 
-    const result = host.destroy("bs_1");
-    expect(result).toEqual({ deleted: true, profileDir: "/tmp/multica-qa-browser/qa-task-t1" });
+    expect(host.destroy("bs_1")).toBe(true);
     expect(windows[0]!.destroy).toHaveBeenCalledTimes(1);
-    expect(removeMock.calls).toEqual(["/tmp/multica-qa-browser/qa-task-t1"]);
+    expect(windows[0]!.contentView.removeChildView).toHaveBeenCalledTimes(1);
+    expect(host.has("bs_1")).toBe(false);
+    // A6 is "view destroyed + registry cleared", not "directory deleted": the
+    // partition is non-persistent, so there is no directory to delete.
   });
 
-  it("reports a failed directory delete instead of claiming cleanup succeeded", () => {
-    removeMock.fail = true;
-    try {
-      const { host } = makeHost();
-      host.ensure(SESSION);
-      expect(host.destroy("bs_1")).toEqual({
-        deleted: false,
-        profileDir: "/tmp/multica-qa-browser/qa-task-t1",
-      });
-    } finally {
-      removeMock.fail = false;
-    }
+  it("reports a second destroy as a no-op rather than a success", () => {
+    const { host } = makeHost();
+    host.ensure(SESSION);
+    expect(host.destroy("bs_1")).toBe(true);
+    expect(host.destroy("bs_1")).toBe(false);
   });
 
   it("skips a bounds update while the window is minimised", () => {
@@ -249,14 +273,24 @@ describe("QaBrowserHost", () => {
           views.push(view);
           return view;
         },
-        partitionDirFor: () => "/tmp/qa-task-t1",
-        removePartitionDir: () => undefined,
       }),
     );
     host.ensure(SESSION);
 
+    // Creation installs one baseline rectangle; the minimised update must add
+    // nothing on top of it.
+    const callsAfterCreate = views[0]!.setBounds.mock.calls.length;
     expect(host.setBounds("bs_1", { x: 0, y: 0, width: 100, height: 100 }, 1)).toBe(true);
-    expect(views[0]!.setBounds).not.toHaveBeenCalled();
+    expect(views[0]!.setBounds.mock.calls.length).toBe(callsAfterCreate);
+  });
+
+  it("gives the view a real rectangle at creation, so an early capture works", () => {
+    const { views, host } = makeHost();
+    host.ensure(SESSION);
+    // A freshly added WebContentsView is 0x0 until a bounds message arrives, and
+    // a 0x0 view captures an empty image — which would fail browser_screenshot
+    // on any session faster than the renderer's first geometry message.
+    expect(views[0]!.setBounds).toHaveBeenCalledWith({ x: 0, y: 0, width: 1200, height: 900 });
   });
 
   it("executes a snapshot as a flat ref list, dropping unnamed noise", async () => {
@@ -301,6 +335,64 @@ describe("QaBrowserHost", () => {
     const { host } = makeHost();
     const result = await host.execute("bs_missing", { id: "c1", action: "browser_url" });
     expect(result).toEqual({ id: "c1", ok: false, error: "BROWSER_CAPABILITY_UNSUPPORTED" });
+  });
+
+  it("blocks a page-initiated navigation to file:, data: and javascript:", () => {
+    const { views, host } = makeHost();
+    host.ensure(SESSION);
+    const webContents = views[0]!.webContents;
+    const listeners = webContents.__listeners ?? {};
+    // Both hooks must exist: setWindowOpenHandler only covers window.open.
+    expect(Object.keys(listeners)).toEqual(expect.arrayContaining(["will-navigate", "will-redirect"]));
+
+    for (const channel of ["will-navigate", "will-redirect"]) {
+      for (const blocked of ["file:///etc/passwd", "data:text/html,<script>alert(1)</script>", "javascript:alert(1)"]) {
+        const preventDefault = vi.fn();
+        listeners[channel]!.forEach((listener) => listener({ preventDefault }, blocked));
+        expect(preventDefault).toHaveBeenCalled();
+      }
+      const preventDefault = vi.fn();
+      listeners[channel]!.forEach((listener) => listener({ preventDefault }, "https://example.com/ok"));
+      expect(preventDefault).not.toHaveBeenCalled();
+    }
+  });
+
+  it("attaches a screenshot through capturePage when the agent asks for one", async () => {
+    const { views, host } = makeHost();
+    host.ensure(SESSION);
+    const sender = vi.fn(async () => ({ ok: true as const, attachmentId: "att_shot" }));
+    host.setEvidenceSender(sender);
+
+    const result = await host.execute("bs_1", { id: "c1", action: "browser_screenshot" });
+
+    expect(views[0]!.webContents.capturePage).toHaveBeenCalledTimes(1);
+    expect(sender).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    expect(result.result).toMatchObject({ attachment_id: "att_shot", viewport_only: true });
+    expect(result.text).toContain("att_shot");
+  });
+
+  it("fails browser_screenshot without uploading when the PNG exceeds 4 MiB", async () => {
+    const { host } = makeHost();
+    host.ensure(SESSION);
+    const sender = vi.fn(async () => ({ ok: true as const, attachmentId: "att_shot" }));
+    host.setEvidenceSender(sender, 1);
+
+    const result = await host.execute("bs_1", { id: "c1", action: "browser_screenshot" });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("BROWSER_EVIDENCE_FAILED");
+    // The daemon would accept 4 MiB + 1 KiB, so the refusal must happen here.
+    expect(sender).not.toHaveBeenCalled();
+  });
+
+  it("reports an evidence failure instead of a vague session error", async () => {
+    const { host } = makeHost();
+    host.ensure(SESSION);
+    host.setEvidenceSender(async () => ({ ok: false as const, reason: "rejected" }));
+
+    const result = await host.execute("bs_1", { id: "c1", action: "browser_screenshot" });
+    expect(result).toEqual({ id: "c1", ok: false, error: "BROWSER_EVIDENCE_FAILED" });
   });
 
   it("drops the query string from a reported URL", () => {

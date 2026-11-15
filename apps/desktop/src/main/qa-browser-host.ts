@@ -1,7 +1,4 @@
 import { BaseWindow, WebContentsView } from "electron";
-import { join } from "path";
-import { tmpdir } from "os";
-import { mkdirSync, rmSync } from "fs";
 import { computeViewBounds } from "../shared/qa-browser";
 import type { QaBrowserRect } from "../shared/qa-browser";
 import type { QaBrowserHostCommand, QaBrowserHostCommandResult } from "./qa-browser-client";
@@ -67,31 +64,46 @@ export type QaBrowserWindow = {
   getContentBounds(): { x: number; y: number; width: number; height: number };
   isMinimized(): boolean;
   show(): void;
+  /** Shows without taking focus — the capture-surface path (P3-safe). */
+  showInactive(): void;
+  setPosition?(x: number, y: number): void;
   focus(): void;
   destroy(): void;
   isDestroyed(): boolean;
   webContents: { id: number };
 };
 
+/**
+ * Where the capture surface lives. Far off any real monitor: the point is to
+ * have a display surface without occupying the desktop.
+ */
+const OFFSCREEN_ORIGIN = -20000;
+
 export type QaBrowserHostAdapters = {
-  createWindow(options: { title: string; width: number; height: number; show: boolean }): QaBrowserWindow;
+  createWindow(options: {
+    title: string;
+    width: number;
+    height: number;
+    show: boolean;
+    /** Off-screen origin, so the capture surface never appears on the desktop. */
+    x?: number;
+    y?: number;
+    skipTaskbar?: boolean;
+  }): QaBrowserWindow;
   createView(options: { partition: string }): QaBrowserView;
-  /** Where a session's partition is materialised on disk (deleted on cleanup). */
-  partitionDirFor(sessionId: string, partition: string): string;
-  /**
-   * Deletes that directory. Its own adapter because the ordering against view
-   * destruction is the invariant under test: on Windows a live renderer holds
-   * file locks, so deleting first always fails.
-   */
-  removePartitionDir(dir: string): void;
 };
+
+/** Uploads one captured PNG and reports where it landed. */
+export type QaBrowserEvidenceSender = (
+  sessionId: string,
+  png: Buffer,
+) => Promise<{ ok: true; attachmentId: string } | { ok: false; reason: string }>;
 
 export type QaBrowserHostEntry = {
   sessionId: string;
   taskId: string;
   issueId: string;
   partition: string;
-  profileDir: string;
   window: QaBrowserWindow;
   view: QaBrowserView;
   visible: boolean;
@@ -117,6 +129,9 @@ export function createProductionAdapters(): QaBrowserHostAdapters {
         width: options.width,
         height: options.height,
         show: options.show,
+        x: options.x,
+        y: options.y,
+        skipTaskbar: options.skipTaskbar,
       }) as unknown as QaBrowserWindow,
     createView: (options) =>
       new WebContentsView({
@@ -125,17 +140,7 @@ export function createProductionAdapters(): QaBrowserHostAdapters {
           partition: options.partition,
         },
       }) as unknown as QaBrowserView,
-    partitionDirFor: (_sessionId, partition) => {
-      // The daemon deletes this exact path, and validates that its leaf is the
-      // session's partition, so a wrong name is refused rather than deleting
-      // something unrelated.
-      const root = join(tmpdir(), "multica-qa-browser");
-      mkdirSync(root, { recursive: true });
-      return join(root, partition);
-    },
-    removePartitionDir: (dir) => {
-      rmSync(dir, { recursive: true, force: true });
-    },
+
   };
 }
 
@@ -149,9 +154,25 @@ export function createProductionAdapters(): QaBrowserHostAdapters {
 export class QaBrowserHost {
   private readonly entries = new Map<string, QaBrowserHostEntry>();
   private readonly adapters: QaBrowserHostAdapters;
+  /**
+   * Uploads a captured PNG and returns its attachment id.
+   *
+   * Injected because the host owns the view while the daemon client owns the
+   * credential and port; wiring them here keeps `browser_screenshot` reachable
+   * from the command loop without the view knowing about secrets.
+   */
+  private captureEvidence: QaBrowserEvidenceSender | null = null;
+  /** Artifact cap, owned by main and never delegated to the daemon. */
+  private evidenceMaxBytes = 4 << 20;
 
   constructor(adapters: QaBrowserHostAdapters = createProductionAdapters()) {
     this.adapters = adapters;
+  }
+
+  /** Installs the evidence sender used by the `browser_screenshot` action. */
+  setEvidenceSender(sender: QaBrowserEvidenceSender | null, maxBytes?: number): void {
+    this.captureEvidence = sender;
+    if (maxBytes !== undefined && maxBytes > 0) this.evidenceMaxBytes = maxBytes;
   }
 
   get(sessionId: string): QaBrowserHostEntry | undefined {
@@ -181,13 +202,35 @@ export class QaBrowserHost {
       title: `QA · ${input.issueId}`,
       width: 1000,
       height: 720,
-      // Never shown on creation: P3 says only an explicit takeover may raise
-      // the window, never an agent start or a background resume.
+      // P3: only an explicit takeover may raise the window. The window is
+      // therefore real but placed far off-screen, not merely hidden — see
+      // `ensureCaptureSurface` for why hiding is not enough.
       show: false,
+      x: OFFSCREEN_ORIGIN,
+      y: OFFSCREEN_ORIGIN,
+      skipTaskbar: true,
     });
     const view = this.adapters.createView({ partition: input.partition });
-    const profileDir = this.adapters.partitionDirFor(input.sessionId, input.partition);
     window.contentView.addChildView(view);
+    // `capturePage()` needs a display surface. Measured on Electron 44.9.3: a
+    // window that has NEVER been shown throws "Current display surface not
+    // available for capture", while the same window after `showInactive()`
+    // captures a full-colour PNG and `isFocused()` stays false. So the window is
+    // shown once, off-screen and without activation, which satisfies I5 without
+    // breaking P3 — nothing appears on the user's desktop and no window takes
+    // focus. The alternative (skip the surface) makes browser_screenshot, and
+    // therefore A4, impossible.
+    // Do NOT reposition after showInactive(): measured on Electron 44.9.3, a
+    // post-show setPosition tears down the display surface and every later
+    // capturePage fails with "Current display surface not available". The
+    // window is already created at OFFSCREEN_ORIGIN, so no move is needed.
+    window.showInactive();
+    // Give the view a real rectangle immediately. Until the renderer sends
+    // `qa-browser:bounds`, a freshly added WebContentsView is 0×0 — and a 0×0
+    // view yields an empty image from capturePage, so `browser_screenshot` would
+    // fail on any session whose first screenshot beat the first bounds message.
+    const content = window.getContentBounds();
+    view.setBounds({ x: 0, y: 0, width: content.width, height: content.height });
     this.applySecurityPolicy(view);
 
     const entry: QaBrowserHostEntry = {
@@ -195,7 +238,6 @@ export class QaBrowserHost {
       taskId: input.taskId,
       issueId: input.issueId,
       partition: input.partition,
-      profileDir,
       window,
       view,
       visible: false,
@@ -222,6 +264,16 @@ export class QaBrowserHost {
       }
       return { action: "deny" };
     });
+    // `setWindowOpenHandler` only covers window.open/target=_blank. A page can
+    // also navigate itself to `file://`, `data:` or `javascript:`, and on a
+    // `file:` document it would render local filesystem contents — which the
+    // evidence channel then uploads to the issue. Both hooks are required.
+    for (const event of ["will-navigate", "will-redirect"] as const) {
+      view.webContents.on(event, (navEvent: unknown, url: unknown) => {
+        if (isAllowedQaBrowserURL(typeof url === "string" ? url : "")) return;
+        (navEvent as { preventDefault?: () => void } | undefined)?.preventDefault?.();
+      });
+    }
     view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => {
       callback(false);
     });
@@ -309,17 +361,17 @@ export class QaBrowserHost {
   }
 
   /**
-   * Phase one of cleanup (SDD §4.2): destroy the view, then remove the
-   * partition directory. The order is not negotiable — removing the directory
-   * first fights the live renderer's file locks and fails on Windows.
+   * Cleans up a session: release the view, then the window.
    *
-   * Returns the directory it deleted so the caller can ack the daemon. A
-   * failure to delete is reported rather than swallowed: the caller keeps the
-   * entry queued for retry.
+   * There is no directory to delete. The partition is non-persistent, so
+   * Chromium keeps cookies and storage in the process and writes no profile
+   * directory — deleting one would have meant deleting a path the daemon never
+   * created, which is precisely the P0-1 attack surface. A6 therefore reads
+   * "view destroyed, registry cleared, no live process", not "directory gone".
    */
-  destroy(sessionId: string): { deleted: boolean; profileDir: string } | null {
+  destroy(sessionId: string): boolean {
     const entry = this.entries.get(sessionId);
-    if (!entry) return null;
+    if (!entry) return false;
     this.entries.delete(sessionId);
     try {
       if (!entry.window.isDestroyed()) {
@@ -327,16 +379,9 @@ export class QaBrowserHost {
         entry.window.destroy();
       }
     } catch {
-      // Already gone: the directory delete below is what still matters.
+      // Already gone: the entry is out of the map, which is what matters.
     }
-    try {
-      this.adapters.removePartitionDir(entry.profileDir);
-      return { deleted: true, profileDir: entry.profileDir };
-    } catch {
-      // The caller keeps the daemon-side retry queue entry; reporting success
-      // here would leave the directory behind with nothing scheduled to retry.
-      return { deleted: false, profileDir: entry.profileDir };
-    }
+    return true;
   }
 
   /** Tears down every view — used when the daemon goes away. */
@@ -352,8 +397,12 @@ export class QaBrowserHost {
    * DOM actions go through the view's own in-process debugger, the same route
    * the R1 PoC measured: `Input.dispatchMouseEvent` three-step click,
    * `focus` + `Input.insertText` for fill, and a polled `Runtime.evaluate`
-   * predicate for wait. Screenshots are NOT taken here — they must be
-   * `capturePage()` on the hidden window (I5), so the caller uses `capture()`.
+   * predicate for wait.
+   *
+   * `browser_screenshot` is a first-class action here, not a side channel: the
+   * agent calling the tool is the only automated source of A4 evidence. It
+   * captures through `capturePage()` and hands the PNG to `captureEvidence`,
+   * which uploads it and returns the attachment id.
    */
   async execute(sessionId: string, command: QaBrowserHostCommand): Promise<QaBrowserHostCommandResult> {
     const entry = this.entries.get(sessionId);
@@ -403,7 +452,34 @@ export class QaBrowserHost {
           return await this.wait(sessionId, command.id, condition, timeoutMs);
         }
         case "browser_console":
-          return { id: command.id, ok: true, text: entry.console.join("\n") || "(no console output)" };
+          // Redacted again on the daemon boundary; doing it here too keeps the
+          // text out of any Desktop-side log or crash dump of this string.
+          return {
+            id: command.id,
+            ok: true,
+            text: entry.console.join("\n") || "(no console output)",
+          };
+        case "browser_screenshot": {
+          if (!this.captureEvidence) {
+            return { id: command.id, ok: false, error: "BROWSER_EVIDENCE_FAILED" };
+          }
+          const capture = await this.capture(sessionId, this.evidenceMaxBytes);
+          if (!capture) return { id: command.id, ok: false, error: "BROWSER_EVIDENCE_FAILED" };
+          if ("tooLarge" in capture) {
+            // Over the 4 MiB artifact cap: do not upload. The daemon's
+            // transport limit is 6 MiB and would accept it, which is exactly
+            // why the product cap cannot live there.
+            return { id: command.id, ok: false, error: "BROWSER_EVIDENCE_FAILED" };
+          }
+          const upload = await this.captureEvidence(sessionId, capture.png);
+          if (!upload.ok) return { id: command.id, ok: false, error: "BROWSER_EVIDENCE_FAILED" };
+          return {
+            id: command.id,
+            ok: true,
+            text: `screenshot attached to the issue: attachment ${upload.attachmentId}`,
+            result: { attachment_id: upload.attachmentId, viewport_only: true },
+          };
+        }
         default:
           return { id: command.id, ok: false, error: `unknown action ${command.action}` };
       }
@@ -596,6 +672,22 @@ export function buildFillExpression(ref: string): string {
     target.focus();
     return { ok: document.activeElement === target };
   })()`;
+}
+
+/**
+ * The only schemes a QA view may navigate to.
+ *
+ * `file:` would render the local filesystem, and the evidence channel would
+ * then upload that view to the issue; `data:` and `javascript:` are page-code
+ * execution surfaces with no legitimate QA use here.
+ */
+export function isAllowedQaBrowserURL(raw: string): boolean {
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 /**

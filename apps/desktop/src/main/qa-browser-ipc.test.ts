@@ -208,8 +208,9 @@ describe("qa-browser IPC", () => {
 
     expect(clientMock.registerQaBrowserHost).toHaveBeenCalledTimes(1);
     const [, , registration] = clientMock.registerQaBrowserHost.mock.calls[0]!;
-    // The partition directory reported to the daemon is the one it deletes.
-    expect(registration.profileDir).toBe("/tmp/qa/bs_1");
+    // No filesystem path crosses this boundary any more: the daemon owns no
+    // directory, so a `profile_dir` would only be something to delete.
+    expect(registration).not.toHaveProperty("profileDir");
     expect(result).toMatchObject({ ok: true, session: { session_id: "bs_1", state: "requested" } });
   });
 
