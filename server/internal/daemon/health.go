@@ -455,6 +455,7 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 	mux.HandleFunc("/environments/stop", d.environmentStopHandler())
 	mux.HandleFunc("/environments/list", d.environmentListHandler())
 	mux.HandleFunc("/environments/focus", d.environmentFocusHandler())
+	d.registerBrowserRoutes(mux)
 
 	srv := &http.Server{Handler: mux}
 

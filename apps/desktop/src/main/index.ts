@@ -20,6 +20,7 @@ import {
   setupDaemonManager,
 } from "./daemon-manager";
 import { setupLocalDirectory } from "./local-directory";
+import { closeQaBrowserWindow, setupQaBrowser } from "./qa-browser-setup";
 import { setupThemeFolder } from "./theme-folder";
 import { configureLinuxFileDialogs } from "./linux-file-dialog";
 import { openExternalSafely, downloadURLSafely } from "./external-url";
@@ -498,6 +499,9 @@ function createMainWindow(saved: WindowState = {}): BrowserWindow {
     authSessionCoordinator.unregisterMainWindow(window);
     mainRendererMessages.release(window, mainWindows.mostRecent());
     if (unreadBadgeCounts.delete(window)) applyUnreadBadge();
+    // A closed window must not leave a QA browser view behind: the daemon would
+    // keep heartbeating a session nobody can reach.
+    closeQaBrowserWindow(window.id);
     if (mainWindows.size > 0) saveWindowSession();
   });
 
@@ -638,6 +642,10 @@ function createIssueWindow(context: IssueWindowContext): void {
   window.on("closed", () => {
     issueWindows.delete(window);
     authSessionCoordinator.unregisterIssueWindow(window);
+    // The sidebar card can open a browser from a dedicated issue window too,
+    // so this path owes the same teardown as a main window: without it the view
+    // would outlive its window and wait out the idle TTL.
+    closeQaBrowserWindow(window.id);
   });
 
   window.on("ready-to-show", () => window.show());
@@ -1093,6 +1101,10 @@ if (!gotTheLock) {
       () => mainWindows.all(),
     );
     setupLocalDirectory(() => mainWindows.mostRecent());
+    // QA built-in isolated browser: IPC, the view host and its heartbeat loop.
+    // Gated on the same feature flag the sidebar card reads, so turning the flag
+    // off leaves no reachable view surface behind.
+    const qaBrowser = setupQaBrowser();
     setupThemeFolder();
 
     // Registered after the updater and daemon gates, so a quit they hold
@@ -1101,6 +1113,7 @@ if (!gotTheLock) {
     app.on("before-quit", (event) => {
       if (event.defaultPrevented) return;
       freezeWindowSession();
+      qaBrowser.dispose();
     });
     // macOS quitAndInstall closes every window before before-quit fires.
     if (process.platform === "darwin") {

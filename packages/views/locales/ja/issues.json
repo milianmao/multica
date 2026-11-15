@@ -1974,5 +1974,27 @@
     "focus_failed": "{{name}} に切り替えられませんでした",
     "retry": "再試行",
     "dismiss": "閉じる"
+  },
+  "qa_browser": {
+    "section_title": "QA ブラウザ",
+    "loading": "状態を読み込み中…",
+    "not_opened": "ブラウザセッションはまだありません",
+    "capability_none": "この実行の Agent はブラウザを操作できません。HTTP MCP に対応した Agent のみ可能なため、開ける項目はありません。",
+    "no_page": "ページは未読み込みです",
+    "locked_by_you": "あなたが操作中",
+    "desktop_offline": "Multica Desktop が起動していないため、このセッションを表示するウィンドウがありません。",
+    "last_evidence": "最終スクリーンショット {{time}}",
+    "takeover": "引き継ぐ",
+    "release": "返す",
+    "open_window": "ウィンドウを表示",
+    "capture": "スクリーンショット",
+    "state": {
+      "requested": "起動中",
+      "hosted": "実行中",
+      "orphaned": "Desktop 切断",
+      "closing": "終了処理中",
+      "closed": "終了",
+      "failed": "失敗"
+    }
   }
 }

@@ -1974,5 +1974,27 @@
     "focus_failed": "{{name}}(으)로 전환할 수 없습니다",
     "retry": "다시 시도",
     "dismiss": "닫기"
+  },
+  "qa_browser": {
+    "section_title": "QA 브라우저",
+    "loading": "상태를 읽는 중…",
+    "not_opened": "아직 브라우저 세션이 없습니다",
+    "capability_none": "이 실행의 Agent는 브라우저를 조작할 수 없습니다. HTTP MCP를 지원하는 Agent만 가능하므로 열 항목이 없습니다.",
+    "no_page": "페이지가 로드되지 않았습니다",
+    "locked_by_you": "직접 조작 중",
+    "desktop_offline": "Multica Desktop이 실행 중이 아니어서 이 세션을 표시할 창이 없습니다.",
+    "last_evidence": "마지막 스크린샷 {{time}}",
+    "takeover": "인수",
+    "release": "돌려주기",
+    "open_window": "창 표시",
+    "capture": "스크린샷",
+    "state": {
+      "requested": "시작 중",
+      "hosted": "실행 중",
+      "orphaned": "Desktop 연결 끊김",
+      "closing": "종료 중",
+      "closed": "종료됨",
+      "failed": "실패"
+    }
   }
 }

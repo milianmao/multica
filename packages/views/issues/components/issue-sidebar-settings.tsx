@@ -58,6 +58,7 @@ export function useIssueSidebarSectionLabels(): Record<IssueSidebarSection, stri
     duplicates: t(($) => $.duplicates.section_title),
     pull_requests: t(($) => $.detail.section_pull_requests),
     environments: t(($) => $.environments.section_title),
+    qa_browser: t(($) => $.qa_browser.section_title),
     deliverables: t(($) => $.deliverables.section_title),
     apps: t(($) => $.app_calls.section_title),
     execution_log: t(($) => $.execution_log.section),

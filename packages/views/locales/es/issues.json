@@ -2055,5 +2055,27 @@
     "focus_failed": "No se pudo cambiar a {{name}}",
     "retry": "Reintentar",
     "dismiss": "Descartar"
+  },
+  "qa_browser": {
+    "section_title": "Navegador de QA",
+    "loading": "Leyendo el estado…",
+    "not_opened": "Todavía no hay sesión de navegador",
+    "capability_none": "El agente de esta ejecución no puede manejar un navegador. Solo los agentes con HTTP MCP pueden, así que no hay nada que abrir aquí.",
+    "no_page": "No hay ninguna página cargada",
+    "locked_by_you": "Tienes el control",
+    "desktop_offline": "Multica Desktop no está en ejecución, así que no hay ventana que aloje esta sesión.",
+    "last_evidence": "Última captura a las {{time}}",
+    "takeover": "Tomar el control",
+    "release": "Devolver",
+    "open_window": "Mostrar ventana",
+    "capture": "Captura",
+    "state": {
+      "requested": "Iniciando",
+      "hosted": "En ejecución",
+      "orphaned": "Desktop desconectado",
+      "closing": "Cerrando",
+      "closed": "Finalizada",
+      "failed": "Fallida"
+    }
   }
 }

@@ -94,6 +94,10 @@ type Task struct {
 	// the local MCP server presents to the agent as tools. Resolved by the
 	// server at claim time; the daemon never reads plugin state itself.
 	PluginHookTools []PluginHookTool `json:"plugin_hook_tools,omitempty"`
+	// QABrowserTools is the claim-time qa_browser feature-flag decision. When
+	// set, the daemon pre-injects the `multica-browser` MCP server before the
+	// CLI starts, with an inert endpoint (SDD §8).
+	QABrowserTools bool `json:"qa_browser_tools,omitempty"`
 	// WorkspaceContext mirrors workspace.context (the per-workspace system
 	// prompt set in Settings → General). Server populates this on every claim
 	// regardless of task kind so the daemon can inject `## Workspace Context`

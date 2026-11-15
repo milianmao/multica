@@ -2055,5 +2055,27 @@
     "focus_failed": "Impossible de basculer vers {{name}}",
     "retry": "Réessayer",
     "dismiss": "Ignorer"
+  },
+  "qa_browser": {
+    "section_title": "Navigateur QA",
+    "loading": "Lecture de l'état…",
+    "not_opened": "Aucune session de navigateur pour l'instant",
+    "capability_none": "L'agent de cette exécution ne peut pas piloter de navigateur. Seuls les agents compatibles HTTP MCP le peuvent, il n'y a donc rien à ouvrir ici.",
+    "no_page": "Aucune page chargée",
+    "locked_by_you": "Vous avez le contrôle",
+    "desktop_offline": "Multica Desktop n'est pas démarré, aucune fenêtre ne peut héberger cette session.",
+    "last_evidence": "Dernière capture à {{time}}",
+    "takeover": "Prendre la main",
+    "release": "Rendre la main",
+    "open_window": "Afficher la fenêtre",
+    "capture": "Capture d'écran",
+    "state": {
+      "requested": "Démarrage",
+      "hosted": "En cours",
+      "orphaned": "Desktop déconnecté",
+      "closing": "Fermeture",
+      "closed": "Terminée",
+      "failed": "Échec"
+    }
   }
 }

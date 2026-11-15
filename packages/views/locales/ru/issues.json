@@ -2223,5 +2223,27 @@
     "focus_failed": "Не удалось переключиться на {{name}}",
     "retry": "Повторить",
     "dismiss": "Скрыть"
+  },
+  "qa_browser": {
+    "section_title": "Браузер QA",
+    "loading": "Чтение состояния…",
+    "not_opened": "Сеанса браузера пока нет",
+    "capability_none": "Агент этого запуска не может управлять браузером. Это умеют только агенты с HTTP MCP, поэтому открывать здесь нечего.",
+    "no_page": "Страница не загружена",
+    "locked_by_you": "Управляете вы",
+    "desktop_offline": "Multica Desktop не запущен, поэтому нет окна для этого сеанса.",
+    "last_evidence": "Последний снимок в {{time}}",
+    "takeover": "Перехватить",
+    "release": "Вернуть",
+    "open_window": "Показать окно",
+    "capture": "Снимок",
+    "state": {
+      "requested": "Запуск",
+      "hosted": "Работает",
+      "orphaned": "Desktop потерян",
+      "closing": "Закрытие",
+      "closed": "Завершён",
+      "failed": "Ошибка"
+    }
   }
 }

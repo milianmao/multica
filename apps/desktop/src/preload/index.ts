@@ -54,6 +54,23 @@ import {
   type TabSelectionShortcutKey,
 } from "../shared/main-renderer-messages";
 import {
+  QA_BROWSER_BOUNDS_CHANNEL,
+  QA_BROWSER_EVIDENCE_CHANNEL,
+  QA_BROWSER_OPEN_CHANNEL,
+  QA_BROWSER_RELEASE_CHANNEL,
+  QA_BROWSER_SESSION_STATE_CHANNEL,
+  QA_BROWSER_TAKEOVER_CHANNEL,
+  QA_BROWSER_TOGGLE_CHANNEL,
+} from "../shared/qa-browser";
+import type {
+  QaBrowserActionResult,
+  QaBrowserBoundsRequest,
+  QaBrowserEvidenceResult,
+  QaBrowserOpenRequest,
+  QaBrowserSessionRequest,
+  QaBrowserToggleRequest,
+} from "../shared/qa-browser";
+import {
   FOCUS_WORKSPACE_WINDOW_CHANNEL,
   OPEN_WORKSPACE_WINDOW_CHANNEL,
   OTHER_WINDOW_WORKSPACES_CHANNEL,
@@ -471,11 +488,34 @@ const updaterAPI = {
     ipcRenderer.invoke("updater:check"),
 };
 
+/**
+ * The QA built-in browser (ORIO-7). Every method is a thin pass-through: main
+ * owns the view, the geometry conversion and the session whitelist, so the
+ * renderer can never name a session it does not own.
+ */
+const qaBrowserAPI = {
+  open: (request: QaBrowserOpenRequest): Promise<QaBrowserActionResult> =>
+    ipcRenderer.invoke(QA_BROWSER_OPEN_CHANNEL, request),
+  getSessionState: (): Promise<QaBrowserActionResult> =>
+    ipcRenderer.invoke(QA_BROWSER_SESSION_STATE_CHANNEL),
+  setVisible: (request: QaBrowserToggleRequest) =>
+    ipcRenderer.send(QA_BROWSER_TOGGLE_CHANNEL, request),
+  setBounds: (request: QaBrowserBoundsRequest) =>
+    ipcRenderer.send(QA_BROWSER_BOUNDS_CHANNEL, request),
+  takeover: (request: QaBrowserSessionRequest): Promise<QaBrowserActionResult> =>
+    ipcRenderer.invoke(QA_BROWSER_TAKEOVER_CHANNEL, request),
+  release: (request: QaBrowserSessionRequest): Promise<QaBrowserActionResult> =>
+    ipcRenderer.invoke(QA_BROWSER_RELEASE_CHANNEL, request),
+  captureEvidence: (request: QaBrowserSessionRequest): Promise<QaBrowserEvidenceResult> =>
+    ipcRenderer.invoke(QA_BROWSER_EVIDENCE_CHANNEL, request),
+};
+
 if (process.contextIsolated) {
   contextBridge.exposeInMainWorld("electron", electronAPI);
   contextBridge.exposeInMainWorld("desktopAPI", desktopAPI);
   contextBridge.exposeInMainWorld("daemonAPI", daemonAPI);
   contextBridge.exposeInMainWorld("updater", updaterAPI);
+  contextBridge.exposeInMainWorld("qaBrowser", qaBrowserAPI);
 } else {
   // @ts-expect-error - fallback for non-isolated context
   window.electron = electronAPI;
@@ -485,4 +525,6 @@ if (process.contextIsolated) {
   window.daemonAPI = daemonAPI;
   // @ts-expect-error - fallback for non-isolated context
   window.updater = updaterAPI;
+  // @ts-expect-error - fallback for non-isolated context
+  window.qaBrowser = qaBrowserAPI;
 }

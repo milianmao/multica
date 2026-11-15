@@ -4,6 +4,7 @@ package redact
 
 import (
 	"regexp"
+	"strings"
 )
 
 // secretPattern pairs a compiled regex with its replacement text.
@@ -63,6 +64,41 @@ var patterns = []secretPattern{
 
 	// Generic "Bearer <token>" in output
 	{regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*\b`), "Bearer [REDACTED]"},
+
+	// Session cookies in a header dump. A QA browser's console output routinely
+	// carries `Cookie: session=...` / `Set-Cookie: ... HttpOnly`, and those
+	// values are live session credentials for the page under test: a comment or
+	// transcript containing one hands over the account. The header name is kept
+	// so the reader still sees that a cookie existed.
+	//
+	// The value runs to the end of the line, or to the closing quote when the
+	// header is embedded in a JSON dump: stopping at the first quote left the
+	// tail of `Cookie: session=a"b` behind, and treating a tab as a separator
+	// (it is not one) let `Cookie<TAB>session=…` through. Both are covered by
+	// consuming the whole run, quotes included.
+	// The value is consumed to the end of the line. A quote-terminated match
+	// left the tail of `Cookie: session=a"b` behind (`…b`), which is a partial
+	// credential still on the wire; over-redacting one line in a console dump
+	// is the cheaper error.
+	{regexp.MustCompile(`(?i)\b(Set-Cookie|Cookie)["']?[ \t]*[:=][^\r\n]*`), "$1: [REDACTED COOKIE]"},
+	// A header whose separator is whitespace rather than a colon — a common
+	// shape when a page logs the pairs it just read. Recognised by what follows
+	// (`name=value`), so ordinary prose mentioning a cookie is left alone.
+	{regexp.MustCompile(`(?i)\b(Set-Cookie|Cookie)[ \t]+([A-Za-z0-9_.~-]+=)[^\r\n]*`), "$1: [REDACTED COOKIE]"},
+
+	// Task-scoped agent tokens (`mat_`). The daemon mints one per run and it
+	// authenticates as that task; a browser console that prints it would leak a
+	// credential into the issue. The prefix is distinctive enough to match
+	// without a word boundary, since it can follow punctuation in JSON.
+	//
+	// The labelled form is matched with its own label. If only the token were
+	// replaced, a leading `token=` would still match the generic
+	// `NAME=value` rule below and rewrite the placeholder into
+	// `[REDACTED CREDENTIAL] AGENT PASS]` — so the label is consumed here.
+	// So is the placeholder's own wording: it avoids TOKEN/SECRET/KEY/CREDENTIAL
+	// for the same reason.
+	{regexp.MustCompile(`(?i)\b(?:token|auth[_-]?token|access[_-]?token|mat)[\"']?\s*[=:]\s*mat_[A-Za-z0-9_-]{20,}`), "[REDACTED AGENT PASS]"},
+	{regexp.MustCompile(`\bmat_[A-Za-z0-9_-]{20,}`), "[REDACTED AGENT PASS]"},
 
 	// Connection strings with embedded passwords
 	{regexp.MustCompile(`(?i)(?:postgres|mysql|mongodb|redis|amqp)(?:ql)?://[^:\s]+:[^@\s]+@`), "[REDACTED CONNECTION STRING]@"},
@@ -166,4 +202,83 @@ func Text(s string) string {
 		s = p.re.ReplaceAllString(s, p.replacement)
 	}
 	return s
+}
+
+// cookiePairPattern finds a bare `name=value` pair whose name looks like a
+// session identifier. `document.cookie` prints exactly this shape — no header
+// prefix at all — so a page that logs it would otherwise leak the session.
+// The name whitelist deliberately stops at session-shaped names. An earlier
+// version included a bare `id`, which matched ordinary markup in a console dump
+// (`element id=submitButton12`) and rewrote a perfectly readable element id into
+// a redaction marker. Over-redaction is not a leak, but it makes the console
+// log useless to the person reading it, which is the same outcome by another
+// route.
+var cookiePairPattern = regexp.MustCompile(`(?i)\b((?:sid|session|sess|token|auth|access|refresh|csrf|xsrf)[A-Za-z0-9_.-]*)[ \t]*=[ \t]*([A-Za-z0-9._~+/%-]+)`)
+
+// looksLikeSessionValue decides whether a matched value is an opaque identifier
+// rather than an ordinary word.
+//
+// The floor exists because this rule is the ambiguous one: `session=failed` or
+// `session=timeout` appear in perfectly readable prose, and a redactor that
+// mangles normal text gets turned off by whoever has to read the output. So a
+// value qualifies when it is pure hex of 12+ characters, or 12+ characters
+// mixing letters and digits.
+func looksLikeSessionValue(value string) bool {
+	if isHexRun(value) {
+		return true
+	}
+	if len(value) < 12 {
+		return false
+	}
+	var hasDigit, hasLetter bool
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+			hasLetter = true
+		}
+	}
+	return hasDigit && hasLetter
+}
+
+// ConsoleText is Text plus the session-pair rule, for browser console output
+// only.
+//
+// TWIN IMPLEMENTATION: apps/desktop/src/main/qa-browser-redact.ts
+// (`redactConsoleText`) reproduces this subset in TypeScript, because the same
+// console line can reach a main-process log or crash dump before any request is
+// made, and this side cannot retract that. The two are intentionally separate
+// code — different languages, different processes — so they are kept in step by
+// hand: changing cookiePairPattern, the value floor, or the cookie header rules
+// HERE requires the same change THERE. SDD §14.9 lists the pairs. It is a separate entry point on purpose: `name=value` is far more
+// ambiguous than a labelled credential, so it is applied where the source is
+// known to be a page dumping its own state, not to every string the server
+// persists.
+func ConsoleText(s string) string {
+	redacted := Text(s)
+	return cookiePairPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+		eq := strings.IndexByte(match, '=')
+		if eq <= 0 || !looksLikeSessionValue(strings.TrimSpace(match[eq+1:])) {
+			return match
+		}
+		return match[:eq] + "=[REDACTED COOKIE]"
+	})
+}
+
+// isHexRun reports whether the value is a long hexadecimal string.
+func isHexRun(value string) bool {
+	if len(value) < 12 {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }

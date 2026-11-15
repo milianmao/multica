@@ -14,6 +14,7 @@ export const ISSUE_SIDEBAR_SECTIONS = [
   "duplicates",
   "pull_requests",
   "environments",
+  "qa_browser",
   "deliverables",
   "apps",
   "execution_log",

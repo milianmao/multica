@@ -2055,5 +2055,27 @@
     "focus_failed": "Couldn't switch to {{name}}",
     "retry": "Retry",
     "dismiss": "Dismiss"
+  },
+  "qa_browser": {
+    "section_title": "QA browser",
+    "loading": "Reading state…",
+    "not_opened": "No browser session yet",
+    "capability_none": "This run's agent cannot drive a browser. Only agents that speak HTTP MCP can, so there is nothing to open here.",
+    "no_page": "No page loaded",
+    "locked_by_you": "You have control",
+    "desktop_offline": "Multica Desktop is not running, so there is no window to host this session.",
+    "last_evidence": "Last screenshot at {{time}}",
+    "takeover": "Take over",
+    "release": "Hand back",
+    "open_window": "Show window",
+    "capture": "Screenshot",
+    "state": {
+      "requested": "Starting",
+      "hosted": "Running",
+      "orphaned": "Desktop lost",
+      "closing": "Closing",
+      "closed": "Ended",
+      "failed": "Failed"
+    }
   }
 }
