@@ -1362,3 +1362,90 @@ func mustDecodePNG1x1(t *testing.T) []byte {
 	}
 	return data
 }
+
+// P1-10: a heartbeat that reports a dead view ends the session.
+//
+// The defect was that `orphaned` had no time-driven exit of its own while every
+// heartbeat refreshed the idle expiry, so a browser the user had closed lived
+// forever and each "open" click revived it for exactly one heartbeat. A dead
+// view is phase-two evidence, so the session closes instead of parking.
+func TestBrowserDeadViewHeartbeatEndsTheSession(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	now := time.Now()
+	d.browserSessions.now = func() time.Time { return now }
+
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-deadview"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+
+	// The user closed the QA window: the host keeps heartbeating but reports
+	// view_alive=false on every tick.
+	var seq int64
+	for tick := 0; tick < 10; tick++ {
+		seq++
+		now = now.Add(2 * time.Second)
+		d.browserSessions.heartbeat(session.ID, seq, false, nil)
+		d.browserSessions.sweep()
+	}
+
+	if got := d.browserSessions.bySessionID(session.ID); got != nil {
+		t.Fatalf("a session whose view has been dead for %d heartbeats is still in the registry (state=%q)",
+			seq, got.State)
+	}
+	if sessions := d.browserSessions.list(); len(sessions) != 0 {
+		t.Fatalf("registry still advertises %d sessions", len(sessions))
+	}
+}
+
+// P1-10: a dead view must not extend its own lifetime, even if it is somehow
+// still `orphaned` rather than closing.
+func TestBrowserDeadViewDoesNotRefreshIdle(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	now := time.Now()
+	d.browserSessions.now = func() time.Time { return now }
+
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-noidle"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+	before := d.browserSessions.bySessionID(session.ID).IdleExpiresAt
+
+	now = now.Add(3 * time.Second)
+	d.browserSessions.heartbeat(session.ID, 1, false, nil)
+
+	// Whether the entry is gone (closing path) or merely no longer refreshed,
+	// the idle expiry must not have moved forward.
+	if got := d.browserSessions.bySessionID(session.ID); got != nil && got.IdleExpiresAt.After(before) {
+		t.Fatalf("a dead-view heartbeat pushed idle expiry from %s to %s", before, got.IdleExpiresAt)
+	}
+}
+
+// P1-10: a live view still refreshes normally, so the guard above is not just
+// "never refresh".
+func TestBrowserLiveViewHeartbeatStillRefreshesIdle(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	now := time.Now()
+	d.browserSessions.now = func() time.Time { return now }
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-liveidle"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+	before := d.browserSessions.bySessionID(session.ID).IdleExpiresAt
+	now = now.Add(3 * time.Second)
+	if _, ok := d.browserSessions.heartbeat(session.ID, 1, true, nil); !ok {
+		t.Fatal("live heartbeat rejected")
+	}
+	if got := d.browserSessions.bySessionID(session.ID).IdleExpiresAt; !got.After(before) {
+		t.Fatalf("a live heartbeat did not refresh idle: %s -> %s", before, got)
+	}
+}

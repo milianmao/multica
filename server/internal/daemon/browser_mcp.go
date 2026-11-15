@@ -281,7 +281,7 @@ func (s *browserMCPServer) handleCall(w http.ResponseWriter, r *http.Request, re
 	defer cancel()
 	text, err := s.daemon.invokeBrowserTool(ctx, s.taskID, spec, params.Arguments)
 	if err != nil {
-		s.writeToolError(w, request.ID, err)
+		s.writeToolError(w, request.ID, spec.Name, err)
 		return
 	}
 	// The single choke point for everything a browser tool hands back.
@@ -304,14 +304,23 @@ func (s *browserMCPServer) handleCall(w http.ResponseWriter, r *http.Request, re
 	})
 }
 
-func (s *browserMCPServer) writeToolError(w http.ResponseWriter, id json.RawMessage, err error) {
+func (s *browserMCPServer) writeToolError(w http.ResponseWriter, id json.RawMessage, toolName string, err error) {
 	code, message := browserToolErrorCode(err)
 	if s.logger != nil {
 		s.logger.Info("browser tool call failed", "task_id", s.taskID, "code", code, "error", message)
 	}
+	// Errors carry text too, and for a console tool that text can quote the
+	// page. The success path already uses ConsoleText for exactly this reason;
+	// the error path used the weaker Text and would have diverged the moment a
+	// failure message started including page data (which `browser_wait` very
+	// nearly did — see its "last value" field).
+	body := redact.Text(code + ": " + message)
+	if toolName == browserToolConsole {
+		body = redact.ConsoleText(code + ": " + message)
+	}
 	writePluginHookMCPResult(w, id, map[string]any{
 		"isError": true,
-		"content": []map[string]any{{"type": "text", "text": redact.Text(code + ": " + message)}},
+		"content": []map[string]any{{"type": "text", "text": body}},
 	})
 }
 

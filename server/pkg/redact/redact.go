@@ -207,7 +207,13 @@ func Text(s string) string {
 // cookiePairPattern finds a bare `name=value` pair whose name looks like a
 // session identifier. `document.cookie` prints exactly this shape — no header
 // prefix at all — so a page that logs it would otherwise leak the session.
-var cookiePairPattern = regexp.MustCompile(`(?i)\b((?:sid|session|sess|auth|access|refresh|id)[A-Za-z0-9_.-]*)[ \t]*=[ \t]*([A-Za-z0-9._~+/%-]+)`)
+// The name whitelist deliberately stops at session-shaped names. An earlier
+// version included a bare `id`, which matched ordinary markup in a console dump
+// (`element id=submitButton12`) and rewrote a perfectly readable element id into
+// a redaction marker. Over-redaction is not a leak, but it makes the console
+// log useless to the person reading it, which is the same outcome by another
+// route.
+var cookiePairPattern = regexp.MustCompile(`(?i)\b((?:sid|session|sess|token|auth|access|refresh|csrf|xsrf)[A-Za-z0-9_.-]*)[ \t]*=[ \t]*([A-Za-z0-9._~+/%-]+)`)
 
 // looksLikeSessionValue decides whether a matched value is an opaque identifier
 // rather than an ordinary word.
@@ -237,7 +243,15 @@ func looksLikeSessionValue(value string) bool {
 }
 
 // ConsoleText is Text plus the session-pair rule, for browser console output
-// only. It is a separate entry point on purpose: `name=value` is far more
+// only.
+//
+// TWIN IMPLEMENTATION: apps/desktop/src/main/qa-browser-redact.ts
+// (`redactConsoleText`) reproduces this subset in TypeScript, because the same
+// console line can reach a main-process log or crash dump before any request is
+// made, and this side cannot retract that. The two are intentionally separate
+// code — different languages, different processes — so they are kept in step by
+// hand: changing cookiePairPattern, the value floor, or the cookie header rules
+// HERE requires the same change THERE. SDD §14.9 lists the pairs. It is a separate entry point on purpose: `name=value` is far more
 // ambiguous than a labelled credential, so it is applied where the source is
 // known to be a page dumping its own state, not to every string the server
 // persists.

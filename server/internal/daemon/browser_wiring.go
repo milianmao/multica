@@ -122,6 +122,34 @@ func NewBrowserHarnessServer(logger *slog.Logger, hostSecret string) (*Daemon, *
 	return d, mux
 }
 
+// StartBrowserHarnessSweeper runs the registry's time-driven transitions for a
+// harness daemon.
+//
+// Without it the harness's "still hosted after 60s" assertion was vacuous:
+// `sweep` is the only writer of time-driven state, `Run` is what normally starts
+// it, and the harness never calls `Run` — so an idle session that should have
+// orphaned also reported `hosted`. A soak assertion against a daemon with no
+// sweeper proves only that HTTP keeps working.
+func (d *Daemon) StartBrowserHarnessSweeper(ctx context.Context, interval time.Duration) {
+	if d == nil || d.browserSessions == nil {
+		return
+	}
+	go d.browserSessions.runBrowserSessionSweeper(ctx, interval)
+}
+
+// BrowserHarnessSessionStates returns every live session's id and state, so the
+// harness can assert on the daemon's own view rather than on HTTP reachability.
+func (d *Daemon) BrowserHarnessSessionStates() map[string]string {
+	out := make(map[string]string)
+	if d == nil || d.browserSessions == nil {
+		return out
+	}
+	for _, s := range d.browserSessions.list() {
+		out[s.ID] = string(s.State)
+	}
+	return out
+}
+
 // RegisterBrowserHarnessTask marks a task as running in this daemon exactly as
 // the claim path would: capability plus the issue/workspace that evidence is
 // allowed to land on.

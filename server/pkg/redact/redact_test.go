@@ -592,3 +592,34 @@ func TestConsoleTextIncludesHeaderRules(t *testing.T) {
 		t.Fatalf("header form not redacted by ConsoleText: %q", got)
 	}
 }
+
+// P2-11: the bare-pair rule must not rewrite ordinary markup. Over-redaction
+// is not a leak, but it makes a console dump unreadable, which reaches the same
+// end by another route.
+func TestConsoleTextLeavesElementIDsAlone(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		"element id=submitButton12",
+		"<div id=mainContent42>",
+		"clicked #id=nav_item_99",
+	} {
+		if got := ConsoleText(input); got != input {
+			t.Fatalf("ordinary markup was rewritten: %q -> %q", input, got)
+		}
+	}
+}
+
+// ...while the session-shaped names the whitelist does cover still redact,
+// including the two added by the tightening.
+func TestConsoleTextCoversSessionShapedNames(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ input, leak string }{
+		{"csrf=Xk9f2LmQ7pR4tW1s", "Xk9f2LmQ7pR4tW1s"},
+		{"xsrf_token=Ab3dE6gH9jK2mN5p", "Ab3dE6gH9jK2mN5p"},
+		{"auth_token=9f8e7d6c5b4a39281706", "9f8e7d6c5b4a39281706"},
+	} {
+		if got := ConsoleText(tc.input); strings.Contains(got, tc.leak) {
+			t.Fatalf("%q survived: %q", tc.leak, got)
+		}
+	}
+}

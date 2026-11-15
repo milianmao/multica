@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/multica-ai/multica/server/internal/daemon"
 )
@@ -51,6 +52,12 @@ func main() {
 		return lastAttachment.ID, nil
 	})
 	daemon.RegisterBrowserHarnessTask(harnessTaskID, "full", harnessIssueID, harnessWorkspce)
+
+	// Start the real sweeper. `sweep` is the only time-driven writer of session
+	// state, and the product starts it in `Run` — which this harness never
+	// calls. Without this line a soak assertion is vacuous: it would pass on an
+	// implementation that orphans every idle session.
+	daemon.StartBrowserHarnessSweeper(context.Background(), time.Second)
 
 	// One extra route only this harness needs: the sink's own record, so the
 	// Node side can assert on what the daemon actually stored.

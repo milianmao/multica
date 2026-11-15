@@ -381,13 +381,28 @@ func (r *browserSessionRegistry) heartbeat(sessionID string, seq int64, viewAliv
 	}
 	s.heartbeatSeq = seq
 	s.lastHeartbeat = r.now()
-	if !viewAlive && s.State == browserStateHosted {
-		// The view died (render-process-gone). The session stays hosted so
-		// the next tool call can report BROWSER_CAPABILITY_UNSUPPORTED, but it
-		// no longer counts as a live host: mark orphaned so nothing waits on
-		// it forever.
-		s.State = browserStateOrphaned
-		s.notifyChange()
+	if !viewAlive {
+		// A heartbeat that reports a dead view IS the phase-two evidence: the
+		// host has just told us the view is gone, which is what the ack exists
+		// to establish. So the session ends here rather than parking.
+		//
+		// Parking it was the defect: `orphaned` had no time-driven exit of its
+		// own, and the idle refresh below kept pushing its expiry out on every
+		// heartbeat, so a closed browser could live forever and each "open"
+		// click would revive it for exactly one heartbeat. Note the return
+		// below skips `touchLocked`: a dead view must never extend its own
+		// lifetime.
+		if s.State == browserStateHosted || s.State == browserStateOrphaned {
+			s.State = browserStateClosing
+			if s.closingSince.IsZero() {
+				s.closingSince = r.now()
+			}
+			s.closedAcked = true
+			s.notifyChange()
+			r.cleanupLocked(s)
+			return s, false
+		}
+		return s, false
 	}
 	if url != nil {
 		// The registry is the only writer of URL, so the query/fragment cut
