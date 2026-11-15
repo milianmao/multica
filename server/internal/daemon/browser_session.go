@@ -64,12 +64,23 @@ const (
 // Default timers from SDD §3.4. They are fields on the registry so focused
 // tests can shrink them without a build tag.
 const (
-	defaultBrowserIdleTTL          = 15 * time.Minute
-	defaultBrowserHumanHardLimit   = 30 * time.Minute
-	defaultBrowserHeartbeatTimeout = 10 * time.Second
+	defaultBrowserIdleTTL        = 15 * time.Minute
+	defaultBrowserHumanHardLimit = 30 * time.Minute
+	// The desktop polls for at most 4s per heartbeat and ticks every 2s, so an
+	// alive host produces an arrival at least every ~6s. 30s is five missed
+	// arrivals: enough that a slow GC pause or a laptop resume does not kill a
+	// live session, short enough that a crashed Desktop is noticed promptly.
+	defaultBrowserHeartbeatTimeout = 30 * time.Second
 	defaultBrowserSweepInterval    = time.Second
-	defaultBrowserCleanupInterval  = 60 * time.Second
-	defaultBrowserCleanupMaxTries  = 3
+
+	defaultBrowserCleanupMaxTries = 3
+	// defaultBrowserLockWait is the per-tool-call lock budget, shared with
+	// browser_wait (SDD §8.1): one context covers both so a takeover can never
+	// turn one tool call into 60 s of silence.
+	// defaultBrowserClosingAckTimeout is two heartbeat windows: long enough for
+	// an ack already in flight to land, short enough that a crashed host's
+	// session does not outlive the crash by more than a minute.
+	defaultBrowserClosingAckTimeout = 2 * defaultBrowserHeartbeatTimeout
 	// defaultBrowserLockWait is the per-tool-call lock budget, shared with
 	// browser_wait (SDD §8.1): one context covers both so a takeover can never
 	// turn one tool call into 60 s of silence.
@@ -137,6 +148,9 @@ type browserSession struct {
 	heartbeatSeq  int64
 	lastHeartbeat time.Time
 	closedAcked   bool
+	// closingSince is when the session entered `closing`. The no-ack timeout is
+	// measured from it, so a host that never answers cannot pin the entry.
+	closingSince time.Time
 
 	// Command channel: the host long-polls for work and reports results.
 	commands      []browserCommand
@@ -188,7 +202,10 @@ type browserSessionRegistry struct {
 	// the idle timer's human-lock pause.
 	humanHardLimit   time.Duration
 	heartbeatTimeout time.Duration
-	logger           *slog.Logger
+	// closingAckTimeout bounds how long `closing` waits for the host's phase-two
+	// ack before the daemon finalizes the session on its own.
+	closingAckTimeout time.Duration
+	logger            *slog.Logger
 }
 
 func newBrowserSessionRegistry(logger *slog.Logger) *browserSessionRegistry {
@@ -196,13 +213,14 @@ func newBrowserSessionRegistry(logger *slog.Logger) *browserSessionRegistry {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	}
 	return &browserSessionRegistry{
-		byID:             make(map[string]*browserSession),
-		byTask:           make(map[string]string),
-		now:              time.Now,
-		idleTTL:          defaultBrowserIdleTTL,
-		humanHardLimit:   defaultBrowserHumanHardLimit,
-		heartbeatTimeout: defaultBrowserHeartbeatTimeout,
-		logger:           logger,
+		byID:              make(map[string]*browserSession),
+		byTask:            make(map[string]string),
+		now:               time.Now,
+		idleTTL:           defaultBrowserIdleTTL,
+		humanHardLimit:    defaultBrowserHumanHardLimit,
+		heartbeatTimeout:  defaultBrowserHeartbeatTimeout,
+		closingAckTimeout: defaultBrowserClosingAckTimeout,
+		logger:            logger,
 	}
 }
 
@@ -235,7 +253,7 @@ func (r *browserSessionRegistry) requestBrowserSession(task activeRepoCheckoutTa
 	defer r.mu.Unlock()
 
 	if id, ok := r.byTask[task.TaskID]; ok {
-		if existing, found := r.byID[id]; found && existing.State != browserStateClosed {
+		if existing, found := r.byID[id]; found && reusableBrowserState(existing.State) {
 			r.touchLocked(existing)
 			return existing, nil
 		}
@@ -271,7 +289,9 @@ func (r *browserSessionRegistry) list() []*browserSession {
 	defer r.mu.Unlock()
 	out := make([]*browserSession, 0, len(r.byID))
 	for _, s := range r.byID {
-		if s.State == browserStateClosed {
+		// `closing` is excluded as well as `closed`: its view is already being
+		// torn down, so advertising it invites a register that would revive it.
+		if !reusableBrowserState(s.State) {
 			continue
 		}
 		out = append(out, s)
@@ -282,6 +302,19 @@ func (r *browserSessionRegistry) list() []*browserSession {
 
 // byTaskID returns the task's session even when closed, so callers can tell
 // "never opened" (nil) from "ended" (a closed session).
+// touchHost refreshes liveness after an in-flight request proves the host is
+// still there. It deliberately does not accept a sequence number: this is not a
+// new observation, it is the arrival of an old one finally completing.
+func (r *browserSessionRegistry) touchHost(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.byID[sessionID]
+	if !ok || s.State == browserStateClosed || s.State == browserStateFailed {
+		return
+	}
+	s.lastHeartbeat = r.now()
+}
+
 func (r *browserSessionRegistry) byTaskID(taskID string) *browserSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -316,7 +349,10 @@ func (r *browserSessionRegistry) registerBrowserHost(sessionID, windowID string,
 		return nil, errBrowserUnknownSession
 	}
 	switch s.State {
-	case browserStateClosed:
+	case browserStateClosed, browserStateClosing:
+		// A closing session's phase-two instruction has already gone out; a
+		// register that reset it to `hosted` would resurrect a session the
+		// daemon has decided to end.
 		r.mu.Unlock()
 		return nil, errBrowserSessionClosed
 	}
@@ -430,6 +466,7 @@ func (r *browserSessionRegistry) closeBrowserSession(sessionID string) (*browser
 		return s, true
 	default:
 		s.State = browserStateClosing
+		s.closingSince = r.now()
 		s.notifyChange()
 		return s, true
 	}
@@ -472,6 +509,9 @@ func (r *browserSessionRegistry) ackClosed(sessionID string) (*browserSession, b
 	}
 	if s.State != browserStateClosing && s.State != browserStateOrphaned && s.State != browserStateHosted {
 		return s, false
+	}
+	if s.closingSince.IsZero() {
+		s.closingSince = r.now()
 	}
 	s.State = browserStateClosing
 	r.cleanupLocked(s)
@@ -524,13 +564,22 @@ func (r *browserSessionRegistry) sweep() {
 		case browserStateClosed:
 			continue
 		case browserStateClosing:
-			// A closing session waits for the host's ack or for host loss;
-			// nothing on disk is pending, so there is no retry queue here.
+			// Phase one normally ends with the host's ack. A host that crashed,
+			// was closed by the user, or simply never answered must not keep the
+			// entry alive forever — that was unbounded memory growth and a
+			// half-dead session the next run could inherit. After the no-ack
+			// budget the daemon finishes the transition itself.
+			if !s.closedAcked && !s.closingSince.IsZero() && now.Sub(s.closingSince) > r.closingAckTimeout {
+				r.logger.Warn("browser session closed without a host ack; finalizing",
+					"session_id", s.ID, "task_id", s.TaskID)
+				r.finalizeLocked(s)
+			}
 			continue
 		}
 		// Human hard limit: independent of the idle pause (D4).
 		if s.Lock == browserLockHuman && !s.HardDeadline.IsZero() && !now.Before(s.HardDeadline) {
 			s.State = browserStateClosing
+			s.closingSince = now
 			s.notifyChange()
 			continue
 		}
@@ -543,6 +592,7 @@ func (r *browserSessionRegistry) sweep() {
 		// Idle TTL: paused while a person holds the lock.
 		if s.Lock != browserLockHuman && !s.IdleExpiresAt.IsZero() && !now.Before(s.IdleExpiresAt) {
 			s.State = browserStateClosing
+			s.closingSince = now
 			s.notifyChange()
 		}
 	}
@@ -790,6 +840,14 @@ func browserHostDirective(s *browserSession) map[string]any {
 // have deleted whatever that path resolved to. Restricting the value here means
 // the partition name is an identifier, never a path fragment.
 var browserTaskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// reusableBrowserState reports whether a session in this state may be handed to
+// a caller again — reused by task, listed for discovery, or registered onto.
+// `closing` is excluded everywhere: it is on its way to `closed`, and treating
+// it as live is what let a finished session be revived.
+func reusableBrowserState(state browserSessionState) bool {
+	return state != browserStateClosed && state != browserStateClosing
+}
 
 // errBrowserInvalidTaskID lets transports answer 400 instead of 500.
 var errBrowserInvalidTaskID = errors.New("invalid browser task id")

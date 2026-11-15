@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -1088,4 +1089,276 @@ func TestBrowserConsoleIsRedactedForBothSinks(t *testing.T) {
 			t.Fatalf("transcript preview would carry %q: %s", secret, preview)
 		}
 	}
+}
+
+// P0-1 (new): an idle session must survive being idle.
+//
+// A heartbeat's real period is "arrive → block in the long poll → return", so
+// the poll length is a floor on the gap between two timestamps. With a 10s poll
+// and a 10s timeout, a quiet session orphaned itself and could never recover —
+// the view was alive, the person could see it, and every tool failed forever.
+func TestBrowserIdleSessionSurvivesTheLongPoll(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	now := time.Now()
+	d.browserSessions.now = func() time.Time { return now }
+
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-idle"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+
+	// Five simulated heartbeat cycles: arrive, sit in the poll, return (touch),
+	// then the desktop's next tick 6s later. That is one worst-case iteration at
+	// the shipped numbers (2s tick + 4s poll).
+	var seq int64
+	for cycle := 0; cycle < 5; cycle++ {
+		seq++
+		if _, accepted := d.browserSessions.heartbeat(session.ID, seq, true, nil); !accepted {
+			t.Fatalf("cycle %d: heartbeat rejected while the session was hosted", cycle)
+		}
+		now = now.Add(browserHostDefaultLongPoll)
+		d.browserSessions.touchHost(session.ID) // the poll returned
+		d.browserSessions.sweep()
+		if got := d.browserSessions.bySessionID(session.ID).State; got != browserStateHosted {
+			t.Fatalf("cycle %d: state = %q after a normal poll cycle, want hosted", cycle, got)
+		}
+		now = now.Add(2 * time.Second) // next tick
+		d.browserSessions.sweep()
+		if got := d.browserSessions.bySessionID(session.ID).State; got != browserStateHosted {
+			t.Fatalf("cycle %d: state = %q while merely idle, want hosted", cycle, got)
+		}
+	}
+
+	// The budgets themselves must leave headroom: the poll can never approach
+	// the timeout, or scheduling jitter alone reintroduces the defect.
+	if browserHostDefaultLongPoll*3 > defaultBrowserHeartbeatTimeout {
+		t.Fatalf("long poll %s is not comfortably inside the %s heartbeat timeout",
+			browserHostDefaultLongPoll, defaultBrowserHeartbeatTimeout)
+	}
+}
+
+// P0-1 (new), negative half: a host that genuinely stops is still detected.
+func TestBrowserDeadHostStillOrphans(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	now := time.Now()
+	d.browserSessions.now = func() time.Time { return now }
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-dead"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+	if _, ok := d.browserSessions.heartbeat(session.ID, 1, true, nil); !ok {
+		t.Fatal("first heartbeat rejected")
+	}
+	now = now.Add(defaultBrowserHeartbeatTimeout + time.Second)
+	d.browserSessions.sweep()
+	if got := d.browserSessions.bySessionID(session.ID).State; got != browserStateOrphaned {
+		t.Fatalf("state after a real timeout = %q, want orphaned", got)
+	}
+}
+
+// P1-3 (new): `closing` is not a live state. It has an exit, and nothing may
+// treat it as reusable.
+func TestBrowserClosingSessionHasAnExit(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	now := time.Now()
+	d.browserSessions.now = func() time.Time { return now }
+
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-close"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+
+	// The window-close path: destroy the view, never ack.
+	if _, ok := d.browserSessions.closeBrowserSession(session.ID); !ok {
+		t.Fatal("close rejected a hosted session")
+	}
+
+	// Not listed for discovery...
+	for _, listed := range d.browserSessions.list() {
+		if listed.ID == session.ID {
+			t.Fatal("a closing session was advertised for discovery; a register would revive it")
+		}
+	}
+	// ...not registered onto...
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "other", true); err == nil {
+		t.Fatal("a closing session accepted a register; that is how a closed session came back to hosted")
+	}
+	// ...and not handed to the next run of the same task.
+	reused, err := d.browserSessions.requestBrowserSession(browserTestTask("task-close"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("re-request: %v", err)
+	}
+	if reused.ID == session.ID {
+		t.Fatal("the next run inherited a closing session")
+	}
+	if reused.State != browserStateRequested {
+		t.Fatalf("replacement state = %q, want requested", reused.State)
+	}
+
+	// The no-ack timeout finalizes the abandoned one instead of `continue`ing
+	// forever: a crashed host must not pin a registry entry.
+	now = now.Add(defaultBrowserClosingAckTimeout + time.Second)
+	d.browserSessions.sweep()
+	if got := d.browserSessions.bySessionID(session.ID); got != nil {
+		t.Fatalf("a session nobody acked survived the closing timeout (state=%q)", got.State)
+	}
+	if sessions := d.browserSessions.list(); len(sessions) != 1 {
+		t.Fatalf("registry holds %d sessions after cleanup, want the one replacement", len(sessions))
+	}
+}
+
+// P1-3 (new): an ack inside the window still finalizes promptly.
+func TestBrowserAckStillClosesImmediately(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-ack"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+	d.browserSessions.closeBrowserSession(session.ID)
+	if _, ok := d.browserSessions.ackClosed(session.ID); !ok {
+		t.Fatal("ack rejected a closing session")
+	}
+	if got := d.browserSessions.bySessionID(session.ID); got != nil {
+		t.Fatal("an acked session stayed in the registry")
+	}
+}
+
+// P1-4 (new): evidence lands on the issue the daemon recorded, not the one a
+// caller claims. The upload runs with the daemon's own credential, so the
+// destination must not be an input.
+func TestBrowserEvidenceTargetIsDerivedNotDeclared(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	// What the claim path records: the truth about this run.
+	d.recordBrowserTask("task-target", browserCapabilityFull, "issue-real", "ws-real")
+	d.markBrowserHostSeen()
+
+	// A caller tries to redirect the write.
+	rec := httptest.NewRecorder()
+	d.browserHostOpenSessionHandler()(rec, browserHostRequest(http.MethodPost, "/browser/host/session",
+		`{"task_id":"task-target","issue_id":"issue-SOMEONE-ELSE","workspace_id":"ws-SOMEONE-ELSE"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open = %d %s", rec.Code, rec.Body)
+	}
+	session := decodeBrowserResponse(t, rec).Session
+	if session.IssueID != "issue-real" {
+		t.Fatalf("session bound issue %q, want the daemon's issue-real: a declared target was trusted",
+			session.IssueID)
+	}
+	if bound := d.browserSessions.bySessionID(session.SessionID); bound.WorkspaceID != "ws-real" {
+		t.Fatalf("session bound workspace %q, want the daemon's ws-real", bound.WorkspaceID)
+	}
+
+	if _, err := d.browserSessions.registerBrowserHost(session.SessionID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+
+	var gotWorkspace, gotIssue string
+	d.browserEvidenceUploader = func(_ context.Context, workspaceID, issueID, _ string, _ []byte) (string, error) {
+		gotWorkspace, gotIssue = workspaceID, issueID
+		return "att_bound", nil
+	}
+	png := bytes.Repeat([]byte{0x89}, 32)
+	sum := sha256.Sum256(png)
+	target := "/browser/host/evidence?session_id=" + session.SessionID +
+		"&bytes=" + strconv.Itoa(len(png)) + "&sha256=" + hex.EncodeToString(sum[:])
+	req := browserHostRequest(http.MethodPost, target, string(png))
+	req.Header.Set("Content-Type", "image/png")
+	er := httptest.NewRecorder()
+	d.browserHostEvidenceHandler()(er, req)
+	if er.Code != http.StatusOK {
+		t.Fatalf("evidence = %d %s", er.Code, er.Body)
+	}
+	if gotIssue != "issue-real" || gotWorkspace != "ws-real" {
+		t.Fatalf("evidence uploaded to %s/%s, want the daemon's issue-real/ws-real", gotWorkspace, gotIssue)
+	}
+}
+
+// P1-4 (new): a task with no recorded target cannot anchor a write at all.
+func TestBrowserEvidenceRequiresARecordedTarget(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	d.recordBrowserCapability("task-no-target", browserCapabilityFull)
+	d.markBrowserHostSeen()
+
+	rec := httptest.NewRecorder()
+	d.browserHostOpenSessionHandler()(rec, browserHostRequest(http.MethodPost, "/browser/host/session",
+		`{"task_id":"task-no-target","issue_id":"issue-claimed","workspace_id":"ws-claimed"}`))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("open for a task with no recorded issue/workspace = %d %s, want 404", rec.Code, rec.Body)
+	}
+	if sessions := d.browserSessions.list(); len(sessions) != 0 {
+		t.Fatalf("a refused open left %d sessions", len(sessions))
+	}
+}
+
+// R3: the real attachment path, against the real server.
+//
+// Every other evidence assertion stops at an injected uploader, so "the bytes
+// reached the daemon" was proven and "the bytes became an attachment" was not.
+// This test closes that gap by calling the production `uploadIssueEvidence`
+// with the daemon's own credential. It is opt-in because it writes a row to the
+// live workspace:
+//
+//	MULTICA_RUN_REAL_ATTACHMENT_SMOKE=1 MULTICA_SMOKE_ISSUE=<id> \
+//	MULTICA_SMOKE_WORKSPACE=<id> go test ./internal/daemon/ -run TestBrowserRealServerAttachment -v
+func TestBrowserRealServerAttachment(t *testing.T) {
+	if os.Getenv("MULTICA_RUN_REAL_ATTACHMENT_SMOKE") != "1" {
+		t.Skip("set MULTICA_RUN_REAL_ATTACHMENT_SMOKE=1 to write a real attachment")
+	}
+	issueID := os.Getenv("MULTICA_SMOKE_ISSUE")
+	workspaceID := os.Getenv("MULTICA_SMOKE_WORKSPACE")
+	if issueID == "" || workspaceID == "" {
+		t.Fatal("MULTICA_SMOKE_ISSUE and MULTICA_SMOKE_WORKSPACE are required")
+	}
+	serverURL := os.Getenv("MULTICA_SMOKE_SERVER")
+	if serverURL == "" {
+		serverURL = "https://api.multica.ai"
+	}
+	token := strings.TrimSpace(os.Getenv("MULTICA_SMOKE_TOKEN"))
+	if token == "" {
+		t.Fatal("MULTICA_SMOKE_TOKEN is required")
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d := &Daemon{logger: logger}
+	d.cfg.ServerBaseURL = serverURL
+	d.client = NewClient(serverURL)
+	d.client.SetToken(token)
+
+	// A tiny but real PNG: the uploader's job is transport, and a 1x1 keeps the
+	// round trip fast while still exercising content-type sniffing end to end.
+	png := mustDecodePNG1x1(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	id, err := d.uploadIssueEvidence(ctx, workspaceID, issueID, "qa-browser-smoke.png", png)
+	if err != nil {
+		t.Fatalf("real attachment upload failed: %v", err)
+	}
+	if id == "" {
+		t.Fatal("server returned an empty attachment id")
+	}
+	t.Logf("REAL ATTACHMENT id=%s bytes=%d server=%s", id, len(png), serverURL)
+}
+
+// mustDecodePNG1x1 returns a minimal valid PNG, so the server's content sniffing
+// sees a real image rather than a renamed blob.
+func mustDecodePNG1x1(t *testing.T) []byte {
+	t.Helper()
+	const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode fixture png: %v", err)
+	}
+	return data
 }

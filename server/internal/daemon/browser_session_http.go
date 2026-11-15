@@ -42,6 +42,14 @@ const (
 	browserEvidenceMaxBytes   = 6 << 20  // 6 MiB transport cap
 	browserHostSecretFile     = "browser-host.secret"
 	browserHostLongPollBudget = 25 * time.Second
+	// browserHostDefaultLongPoll is what Desktop actually asks for. It must be
+	// far below defaultBrowserHeartbeatTimeout: a heartbeat's real period is
+	// "arrive → block for the poll → return", so the poll length is a floor on
+	// the gap between two timestamps unless the daemon touches on return (it
+	// does — see the handler). Both belts are on purpose: the numbers alone
+	// leave no room for scheduling jitter, and the touch alone would hide a
+	// genuinely dead host behind its own in-flight request.
+	browserHostDefaultLongPoll = 4 * time.Second
 )
 
 // browserResponse is the single success/error envelope. Desktop needs to tell
@@ -497,6 +505,13 @@ func (d *Daemon) browserHostHeartbeatHandler() http.HandlerFunc {
 			writeBrowserError(w, http.StatusNotFound, browserCodeSessionUnavailable, "unknown browser session")
 			return
 		}
+		// The poll is finished, so the host has just proven it is alive *now*.
+		// Without this, "waiting in a long poll" and "gone" shared one clock:
+		// the timestamp was stamped on arrival, the request then blocked for the
+		// whole poll, and an idle session was declared orphaned by its own
+		// in-flight heartbeat. Refreshing here is what makes the poll an
+		// activity signal rather than a liveness gap.
+		d.browserSessions.touchHost(sessionID)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"code":      "OK",

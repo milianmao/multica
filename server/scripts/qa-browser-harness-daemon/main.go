@@ -50,7 +50,7 @@ func main() {
 		logger.Info("harness stored evidence", "workspace", workspaceID, "issue", issueID, "file", filename, "bytes", len(data))
 		return lastAttachment.ID, nil
 	})
-	daemon.RegisterBrowserHarnessTask(harnessTaskID, "full")
+	daemon.RegisterBrowserHarnessTask(harnessTaskID, "full", harnessIssueID, harnessWorkspce)
 
 	// One extra route only this harness needs: the sink's own record, so the
 	// Node side can assert on what the daemon actually stored.

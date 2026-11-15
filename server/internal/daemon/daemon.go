@@ -751,6 +751,11 @@ type Daemon struct {
 	// opened session can report capability=none instead of failing silently.
 	browserCapabilitiesMu sync.Mutex
 	browserCapabilities   map[string]string
+	// browserTaskIssues/browserTaskWorkspaces are the claim-time binding an
+	// evidence upload writes to. They exist so the destination of a write
+	// performed with the daemon's own credential is never a caller's choice.
+	browserTaskIssues     map[string]string
+	browserTaskWorkspaces map[string]string
 
 	// localPathLocks serialises agent tasks whose project resource is a
 	// local_directory pinned to this daemon. Two tasks targeting the same
@@ -8328,7 +8333,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.QABrowserTools && task.Agent != nil && providerSupportsRemoteMCPBroker(provider) {
 		browserCapability = browserCapabilityFull
 	}
-	d.recordBrowserCapability(task.ID, browserCapability)
+	d.recordBrowserTask(task.ID, browserCapability, task.IssueID, task.WorkspaceID)
 	// A6 wants the view gone at task终态, and by then the only actor allowed to
 	// send the task-plane DELETE is gone with it: the agent process has exited
 	// and its token is revoked by the time the defer runs. Closing here means

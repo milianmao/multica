@@ -122,10 +122,11 @@ func NewBrowserHarnessServer(logger *slog.Logger, hostSecret string) (*Daemon, *
 	return d, mux
 }
 
-// RegisterBrowserHarnessTask marks a task as running in this daemon with the
-// given capability, as the claim path would.
-func (d *Daemon) RegisterBrowserHarnessTask(taskID, capability string) {
-	d.recordBrowserCapability(taskID, capability)
+// RegisterBrowserHarnessTask marks a task as running in this daemon exactly as
+// the claim path would: capability plus the issue/workspace that evidence is
+// allowed to land on.
+func (d *Daemon) RegisterBrowserHarnessTask(taskID, capability, issueID, workspaceID string) {
+	d.recordBrowserTask(taskID, capability, issueID, workspaceID)
 }
 
 // SetBrowserHarnessEvidenceUploader replaces the attachment uploader so the
@@ -196,11 +197,11 @@ func (d *Daemon) browserHostOpenSessionHandler() http.HandlerFunc {
 			return
 		}
 		d.markBrowserHostSeen()
+		// issue_id / workspace_id in the body are accepted for compatibility
+		// and ignored: they are derived from the daemon's claim record below.
 		var request struct {
-			TaskID      string `json:"task_id"`
-			IssueID     string `json:"issue_id"`
-			WorkspaceID string `json:"workspace_id"`
-			AgentID     string `json:"agent_id"`
+			TaskID  string `json:"task_id"`
+			AgentID string `json:"agent_id"`
 		}
 		if err := json.Unmarshal(body, &request); err != nil {
 			browserTransportError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -218,15 +219,26 @@ func (d *Daemon) browserHostOpenSessionHandler() http.HandlerFunc {
 		// A task this daemon is not running has no recorded capability and no
 		// lifetime to bind to. Refusing is the whole point of the host plane
 		// being able to name a task: it may confirm, never invent.
-		if !d.browserTaskKnown(taskID) {
+		// The binding is task-level, and everything downstream of it — the
+		// evidence destination above all — comes from what this daemon recorded
+		// at claim time, never from the request.
+		issueID, workspaceID, known := d.browserTaskTarget(taskID)
+		if !known {
 			browserTransportError(w, http.StatusNotFound,
 				"this daemon is not running that task, so no browser session can be opened for it")
 			return
 		}
+		if issueID == "" || workspaceID == "" {
+			// A task without a recorded target cannot anchor evidence; refusing
+			// beats writing the screenshot somewhere arbitrary later.
+			browserTransportError(w, http.StatusNotFound,
+				"this daemon has no issue/workspace on record for that task")
+			return
+		}
 		session, err := d.browserSessions.requestBrowserSession(activeRepoCheckoutTask{
 			TaskID:      taskID,
-			IssueID:     strings.TrimSpace(request.IssueID),
-			WorkspaceID: strings.TrimSpace(request.WorkspaceID),
+			IssueID:     issueID,
+			WorkspaceID: workspaceID,
 			AgentID:     strings.TrimSpace(request.AgentID),
 		}, d.browserCapabilityForTask(taskID))
 		if err != nil {
@@ -267,6 +279,16 @@ func (d *Daemon) browserTaskKnown(taskID string) bool {
 
 // recordBrowserCapability remembers the provider decision for one task.
 func (d *Daemon) recordBrowserCapability(taskID, capability string) {
+	d.recordBrowserTask(taskID, capability, "", "")
+}
+
+// recordBrowserTask remembers everything the daemon knows about a running task
+// that a browser session must not take from a request body.
+//
+// `issue_id`/`workspace_id` live here because they decide where evidence is
+// written, and the daemon uploads with its own credential. A caller-supplied
+// value would be a confused deputy: the daemon's token, the caller's target.
+func (d *Daemon) recordBrowserTask(taskID, capability, issueID, workspaceID string) {
 	if taskID == "" {
 		return
 	}
@@ -275,13 +297,39 @@ func (d *Daemon) recordBrowserCapability(taskID, capability string) {
 		d.browserCapabilities = make(map[string]string)
 	}
 	d.browserCapabilities[taskID] = capability
+	if issueID != "" {
+		if d.browserTaskIssues == nil {
+			d.browserTaskIssues = make(map[string]string)
+		}
+		d.browserTaskIssues[taskID] = issueID
+	}
+	if workspaceID != "" {
+		if d.browserTaskWorkspaces == nil {
+			d.browserTaskWorkspaces = make(map[string]string)
+		}
+		d.browserTaskWorkspaces[taskID] = workspaceID
+	}
 	d.browserCapabilitiesMu.Unlock()
 }
 
-// forgetBrowserCapability drops the entry when the task ends.
+// browserTaskTarget returns the daemon-recorded issue and workspace for a task.
+// `ok` is false when this daemon never claimed that task, which is the same
+// condition that refuses the session outright.
+func (d *Daemon) browserTaskTarget(taskID string) (issueID, workspaceID string, ok bool) {
+	d.browserCapabilitiesMu.Lock()
+	defer d.browserCapabilitiesMu.Unlock()
+	if _, known := d.browserCapabilities[taskID]; !known {
+		return "", "", false
+	}
+	return d.browserTaskIssues[taskID], d.browserTaskWorkspaces[taskID], true
+}
+
+// forgetBrowserCapability drops the entries when the task ends.
 func (d *Daemon) forgetBrowserCapability(taskID string) {
 	d.browserCapabilitiesMu.Lock()
 	delete(d.browserCapabilities, taskID)
+	delete(d.browserTaskIssues, taskID)
+	delete(d.browserTaskWorkspaces, taskID)
 	d.browserCapabilitiesMu.Unlock()
 }
 

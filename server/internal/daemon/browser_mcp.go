@@ -292,8 +292,15 @@ func (s *browserMCPServer) handleCall(w http.ResponseWriter, r *http.Request, re
 	// agent's context (which the agent may write into a comment) and the
 	// transcript the provider echoes back to the daemon. Redacting here covers
 	// both; redacting at either sink alone leaves the other open.
+	// Console output is the one result that is a page's own dump, so it gets
+	// the stricter entry point: `document.cookie` prints bare `name=value`
+	// pairs with no header prefix, and only this rule catches those.
+	body := redact.Text(text)
+	if spec.Name == browserToolConsole {
+		body = redact.ConsoleText(text)
+	}
 	writePluginHookMCPResult(w, request.ID, map[string]any{
-		"content": []map[string]any{{"type": "text", "text": redact.Text(text)}},
+		"content": []map[string]any{{"type": "text", "text": body}},
 	})
 }
 

@@ -505,3 +505,90 @@ func TestTextKeepsTheCookieHeaderName(t *testing.T) {
 		t.Fatalf("cookie header name was lost: %q", got)
 	}
 }
+
+// The review's four reproductions, plus the shape that mattered most: a page
+// printing `document.cookie`, which has no header prefix at all.
+func TestTextFixesTheCookieRuleRoughEdges(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		input string
+		leaks []string
+	}{
+		{"quote inside the value", `Cookie: session=a"b`, []string{"a\"b"}},
+		{"tab separator", "Cookie\tsession=tabsep", []string{"tabsep"}},
+		{"json-quoted header", `"Cookie": "session=abc"`, []string{"session=abc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Text(tc.input)
+			for _, leak := range tc.leaks {
+				if strings.Contains(got, leak) {
+					t.Fatalf("%q survived: %q -> %q", leak, tc.input, got)
+				}
+			}
+			if !strings.Contains(got, "[REDACTED COOKIE]") {
+				t.Fatalf("no placeholder in %q", got)
+			}
+		})
+	}
+}
+
+// Prose that merely mentions cookies must survive; a redactor that mangles it
+// gets switched off, and then it protects nothing.
+func TestTextLeavesCookieProseAlone(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		"Cookies are delicious",
+		"set a cookie policy in settings",
+	} {
+		if got := Text(input); got != input {
+			t.Fatalf("prose was rewritten: %q -> %q", input, got)
+		}
+	}
+}
+
+// `document.cookie` output has no header prefix, so it needs the pair rule.
+// It lives in ConsoleText, not Text: bare name=value is too ambiguous to apply
+// to every string the server persists.
+func TestConsoleTextCatchesDocumentCookie(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		input string
+		leak  string
+	}{
+		{"session=abc123def456; theme=dark", "abc123def456"},
+		{"sid=SECRETVALUE0123456789; Path=/", "SECRETVALUE0123456789"},
+		{"console: document.cookie -> sid=SECRETVALUE0123456789; Path=/", "SECRETVALUE0123456789"},
+		{"auth_token=9f8e7d6c5b4a39281706", "9f8e7d6c5b4a39281706"},
+	}
+	for _, tc := range cases {
+		got := ConsoleText(tc.input)
+		if strings.Contains(got, tc.leak) {
+			t.Fatalf("%q survived: %q -> %q", tc.leak, tc.input, got)
+		}
+	}
+}
+
+// The floor in the pair rule: readable words are not credentials.
+func TestConsoleTextKeepsReadableSessionValues(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		"session=failed",
+		"the session=timeout happened",
+		"session=ok",
+	} {
+		if got := ConsoleText(input); got != input {
+			t.Fatalf("readable text was rewritten: %q -> %q", input, got)
+		}
+	}
+}
+
+// ConsoleText must not lose the header rules it layers on top of.
+func TestConsoleTextIncludesHeaderRules(t *testing.T) {
+	t.Parallel()
+	got := ConsoleText(`fetch("/a", {headers: {"Cookie": "session=abc123def456"}})`)
+	if !strings.Contains(got, "[REDACTED COOKIE]") || strings.Contains(got, "abc123def456") {
+		t.Fatalf("header form not redacted by ConsoleText: %q", got)
+	}
+}
