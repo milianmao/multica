@@ -3,12 +3,13 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -131,17 +132,11 @@ type browserSession struct {
 	ErrorMessage string
 
 	// Host-plane facts reported by Desktop.
-	HostWindowID   string
-	HostProfileDir string
-	cdpReady       bool
-	heartbeatSeq   int64
-	lastHeartbeat  time.Time
-	closedAcked    bool
-
-	// Cleanup bookkeeping for the second phase.
-	cleanupAttempts int
-	cleanupWarned   bool
-	nextCleanupAt   time.Time
+	HostWindowID  string
+	cdpReady      bool
+	heartbeatSeq  int64
+	lastHeartbeat time.Time
+	closedAcked   bool
 
 	// Command channel: the host long-polls for work and reports results.
 	commands      []browserCommand
@@ -150,11 +145,6 @@ type browserSession struct {
 
 	// change broadcasts every state or lock change to lock waiters.
 	change chan struct{}
-
-	// fallbackRemembered keeps a session alive for one final browser_goto with
-	// no partition directory to delete; unused today but keeps the cleanup
-	// path uniform for tests that create host-less sessions.
-	noPartition bool
 }
 
 func (s *browserSession) notifier() chan struct{} {
@@ -198,8 +188,6 @@ type browserSessionRegistry struct {
 	// the idle timer's human-lock pause.
 	humanHardLimit   time.Duration
 	heartbeatTimeout time.Duration
-	cleanupInterval  time.Duration
-	cleanupMaxTries  int
 	logger           *slog.Logger
 }
 
@@ -214,8 +202,6 @@ func newBrowserSessionRegistry(logger *slog.Logger) *browserSessionRegistry {
 		idleTTL:          defaultBrowserIdleTTL,
 		humanHardLimit:   defaultBrowserHumanHardLimit,
 		heartbeatTimeout: defaultBrowserHeartbeatTimeout,
-		cleanupInterval:  defaultBrowserCleanupInterval,
-		cleanupMaxTries:  defaultBrowserCleanupMaxTries,
 		logger:           logger,
 	}
 }
@@ -239,6 +225,12 @@ func newBrowserSessionID() (string, error) {
 // closed session is replaced, which is the only way to start over after a
 // heartbeat loss (SDD §9 case 2).
 func (r *browserSessionRegistry) requestBrowserSession(task activeRepoCheckoutTask, capability string) (*browserSession, error) {
+	// The registry is the last gate before an id becomes session state, so the
+	// check lives here rather than at one entry point: both planes, and any
+	// future caller, get it.
+	if err := validateBrowserTaskID(task.TaskID); err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -259,7 +251,7 @@ func (r *browserSessionRegistry) requestBrowserSession(task activeRepoCheckoutTa
 		IssueID:       task.IssueID,
 		WorkspaceID:   task.WorkspaceID,
 		AgentID:       task.AgentID,
-		Partition:     "qa-task-" + task.TaskID,
+		Partition:     browserPartitionName(task.TaskID),
 		Capability:    capability,
 		State:         browserStateRequested,
 		Lock:          browserLockNone,
@@ -316,7 +308,7 @@ func (r *browserSessionRegistry) touchLocked(s *browserSession) {
 }
 
 // registerBrowserHost attaches a Desktop host to a requested session.
-func (r *browserSessionRegistry) registerBrowserHost(sessionID, windowID, profileDir string, cdpReady bool) (*browserSession, error) {
+func (r *browserSessionRegistry) registerBrowserHost(sessionID, windowID string, cdpReady bool) (*browserSession, error) {
 	r.mu.Lock()
 	s, ok := r.byID[sessionID]
 	if !ok {
@@ -329,7 +321,6 @@ func (r *browserSessionRegistry) registerBrowserHost(sessionID, windowID, profil
 		return nil, errBrowserSessionClosed
 	}
 	s.HostWindowID = windowID
-	s.HostProfileDir = profileDir
 	s.cdpReady = cdpReady
 	s.State = browserStateHosted
 	s.lastHeartbeat = r.now()
@@ -498,25 +489,15 @@ func (r *browserSessionRegistry) finalizeLocked(s *browserSession) {
 	}
 }
 
-// cleanupLocked performs the directory delete and either closes the session or
-// queues it for retry.
+// cleanupLocked finalizes a session. It deletes nothing on disk.
+//
+// The QA view's partition is non-persistent (`qa-task-<id>` has no `persist:`
+// prefix), so Chromium keeps its state in the process and writes no profile
+// directory. Deleting a path the daemon never created bought no isolation and
+// turned a caller-supplied identifier into a filesystem operation; removing
+// that path entirely is the fix, not tightening its validation. Desktop's
+// `host.destroy()` already releases the view and any in-memory session state.
 func (r *browserSessionRegistry) cleanupLocked(s *browserSession) {
-	if s.HostProfileDir == "" || s.noPartition {
-		r.finalizeLocked(s)
-		return
-	}
-	if err := os.RemoveAll(s.HostProfileDir); err != nil {
-		// Windows keeps a file lock while the renderer is alive; the queue is
-		// the documented answer rather than a retry storm in-process.
-		s.cleanupAttempts++
-		s.nextCleanupAt = r.now().Add(r.cleanupInterval)
-		if s.cleanupAttempts >= r.cleanupMaxTries && !s.cleanupWarned {
-			s.cleanupWarned = true
-			r.logger.Warn("browser session partition directory could not be removed; retaining cleanup queue entry",
-				"session_id", s.ID, "attempts", s.cleanupAttempts, "error", err)
-		}
-		return
-	}
 	r.finalizeLocked(s)
 }
 
@@ -532,8 +513,8 @@ func (r *browserSessionRegistry) closeWaitersLocked(s *browserSession) {
 	s.notifyCommand()
 }
 
-// sweep applies the three timers and the cleanup retry queue. It is the only
-// writer of time-driven transitions.
+// sweep applies the three timers. It is the only writer of time-driven
+// transitions.
 func (r *browserSessionRegistry) sweep() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -543,9 +524,8 @@ func (r *browserSessionRegistry) sweep() {
 		case browserStateClosed:
 			continue
 		case browserStateClosing:
-			if s.cleanupAttempts > 0 && !now.Before(s.nextCleanupAt) && s.closedAcked {
-				r.cleanupLocked(s)
-			}
+			// A closing session waits for the host's ack or for host loss;
+			// nothing on disk is pending, so there is no retry queue here.
 			continue
 		}
 		// Human hard limit: independent of the idle pause (D4).
@@ -800,22 +780,35 @@ func browserHostDirective(s *browserSession) map[string]any {
 	return nil
 }
 
-// partitionDirName is the on-disk leaf Desktop must report so the daemon can
-// delete it. It is validated rather than trusted: the daemon only deletes a
-// path whose base name is exactly this session's partition.
-func browserPartitionLeaf(partition string) string {
-	return filepath.Base(partition)
-}
+// browserTaskIDPattern is the only shape a task id may take before it reaches
+// the registry.
+//
+// A task id arrives from a host-plane request body, and it used to be
+// concatenated into the partition name, which later became a filesystem path.
+// `..\..\Windows\Temp\victim-dir` passed every length check and made
+// `filepath.Base(dir) == filepath.Base(partition)` true, so the daemon would
+// have deleted whatever that path resolved to. Restricting the value here means
+// the partition name is an identifier, never a path fragment.
+var browserTaskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
-func validateBrowserProfileDir(dir, partition string) error {
-	if dir == "" {
-		return nil
-	}
-	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("browser host profile dir must be absolute")
-	}
-	if browserPartitionLeaf(dir) != browserPartitionLeaf(partition) {
-		return fmt.Errorf("browser host profile dir does not belong to this session's partition")
+// errBrowserInvalidTaskID lets transports answer 400 instead of 500.
+var errBrowserInvalidTaskID = errors.New("invalid browser task id")
+
+// validateBrowserTaskID reports whether a task id may enter the registry.
+func validateBrowserTaskID(taskID string) error {
+	if !browserTaskIDPattern.MatchString(taskID) {
+		return fmt.Errorf("%w: task_id must be 1-128 characters from [A-Za-z0-9_-]", errBrowserInvalidTaskID)
 	}
 	return nil
+}
+
+// browserPartitionName derives the partition from a validated task id.
+//
+// Even with the identifier check above, the name is built from a hash rather
+// than the raw value: the partition is handed to Desktop, echoed back on
+// register, and would otherwise carry caller-controlled text into the
+// Chromium partition namespace.
+func browserPartitionName(taskID string) string {
+	sum := sha256.Sum256([]byte(taskID))
+	return "qa-task-" + hex.EncodeToString(sum[:8])
 }

@@ -57,6 +57,9 @@ func TestBrowserPlanesEndToEndOverTCP(t *testing.T) {
 	d.registerActiveRepoCheckoutTask("mat_smoke", activeRepoCheckoutTask{
 		WorkspaceID: "ws", TaskID: "task-smoke", IssueID: "issue-smoke", AgentID: "agent-smoke",
 	})
+	// The claim path records this before the task runs; the host plane refuses
+	// to open a session for a task the daemon has no decision for.
+	d.recordBrowserCapability("task-smoke", browserCapabilityFull)
 	d.browserHostSeenAt.Store(time.Now().UnixNano())
 
 	mux := http.NewServeMux()
@@ -251,8 +254,9 @@ func TestBrowserPlanesEndToEndOverTCP(t *testing.T) {
 	if closing.Directive == nil || closing.Directive["action"] != "close_view" {
 		t.Fatalf("directive = %+v, want close_view", closing.Directive)
 	}
+	// The daemon owns no directory: it neither created nor deletes this path.
 	if _, statErr := os.Stat(partitionDir); statErr != nil {
-		t.Fatalf("partition dir removed before the host acked: %v", statErr)
+		t.Fatalf("a directory the daemon must not touch was removed before the ack: %v", statErr)
 	}
 
 	status, body = do(http.MethodPost, "/browser/host/session/closed", mergeHeaders(hostAuth, jsonHeaders),
@@ -260,8 +264,14 @@ func TestBrowserPlanesEndToEndOverTCP(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("closed ack = %d %s", status, body)
 	}
-	if _, statErr := os.Stat(partitionDir); !os.IsNotExist(statErr) {
-		t.Fatalf("partition dir survived the two-phase cleanup: %v", statErr)
+	// P1-4: cleanup is now "view destroyed + registry cleared + no process",
+	// not "directory deleted". The path must be untouched — a non-persistent
+	// partition never wrote there, and deleting it was the P0-1 attack surface.
+	if _, statErr := os.Stat(partitionDir); statErr != nil {
+		t.Fatalf("cleanup deleted a directory the daemon does not own: %v", statErr)
+	}
+	if d.browserSessions.bySessionID(sessionID) != nil {
+		t.Fatalf("session %s survived its cleanup", sessionID)
 	}
 
 	// 7. A second DELETE is still a success (I6).

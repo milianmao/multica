@@ -64,6 +64,27 @@ var patterns = []secretPattern{
 	// Generic "Bearer <token>" in output
 	{regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*\b`), "Bearer [REDACTED]"},
 
+	// Session cookies in a header dump. A QA browser's console output routinely
+	// carries `Cookie: session=...` / `Set-Cookie: ... HttpOnly`, and those
+	// values are live session credentials for the page under test: a comment or
+	// transcript containing one hands over the account. The header name is kept
+	// so the reader still sees that a cookie existed.
+	{regexp.MustCompile(`(?i)\b(Set-Cookie|Cookie)["']?\s*:\s*["']?[^\r\n"']+["']?`), "$1: [REDACTED COOKIE]"},
+
+	// Task-scoped agent tokens (`mat_`). The daemon mints one per run and it
+	// authenticates as that task; a browser console that prints it would leak a
+	// credential into the issue. The prefix is distinctive enough to match
+	// without a word boundary, since it can follow punctuation in JSON.
+	//
+	// The labelled form is matched with its own label. If only the token were
+	// replaced, a leading `token=` would still match the generic
+	// `NAME=value` rule below and rewrite the placeholder into
+	// `[REDACTED CREDENTIAL] AGENT PASS]` — so the label is consumed here.
+	// So is the placeholder's own wording: it avoids TOKEN/SECRET/KEY/CREDENTIAL
+	// for the same reason.
+	{regexp.MustCompile(`(?i)\b(?:token|auth[_-]?token|access[_-]?token|mat)[\"']?\s*[=:]\s*mat_[A-Za-z0-9_-]{20,}`), "[REDACTED AGENT PASS]"},
+	{regexp.MustCompile(`\bmat_[A-Za-z0-9_-]{20,}`), "[REDACTED AGENT PASS]"},
+
 	// Connection strings with embedded passwords
 	{regexp.MustCompile(`(?i)(?:postgres|mysql|mongodb|redis|amqp)(?:ql)?://[^:\s]+:[^@\s]+@`), "[REDACTED CONNECTION STRING]@"},
 

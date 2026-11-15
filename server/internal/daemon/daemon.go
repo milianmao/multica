@@ -8329,7 +8329,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		browserCapability = browserCapabilityFull
 	}
 	d.recordBrowserCapability(task.ID, browserCapability)
-	defer d.forgetBrowserCapability(task.ID)
+	// A6 wants the view gone at task终态, and by then the only actor allowed to
+	// send the task-plane DELETE is gone with it: the agent process has exited
+	// and its token is revoked by the time the defer runs. Closing here means
+	// the session never outlives its run instead of waiting out the idle TTL.
+	defer func() {
+		if session := d.browserSessions.byTaskID(task.ID); session != nil {
+			d.browserSessions.closeBrowserSession(session.ID)
+		}
+		d.forgetBrowserCapability(task.ID)
+	}()
 	if browserCapability == browserCapabilityFull {
 		browserMCPConfig, browserMCPServer, browserMCPErr := startTaskBrowserMCP(ctx, d, task.ID, taskLog)
 		if browserMCPErr != nil {

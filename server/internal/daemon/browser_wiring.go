@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -104,6 +105,35 @@ func readLimitedBody(r *http.Request, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// NewBrowserHarnessServer builds a daemon whose browser planes are reachable
+// over HTTP, for the stage-7 integration harness only.
+//
+// It exists because the harness must exercise the REAL handlers and the REAL
+// routing table, not a reimplementation: the exported constructor and the
+// setters below are the minimum surface that lets an out-of-package main drive
+// browser_session_http.go end to end on a real listener. Product code never
+// calls this — `Run` wires the same pieces privately.
+func NewBrowserHarnessServer(logger *slog.Logger, hostSecret string) (*Daemon, *http.ServeMux) {
+	d := &Daemon{logger: logger}
+	d.browserSessions = newBrowserSessionRegistry(logger)
+	d.browserHostSecretValue = hostSecret
+	mux := http.NewServeMux()
+	d.registerBrowserRoutes(mux)
+	return d, mux
+}
+
+// RegisterBrowserHarnessTask marks a task as running in this daemon with the
+// given capability, as the claim path would.
+func (d *Daemon) RegisterBrowserHarnessTask(taskID, capability string) {
+	d.recordBrowserCapability(taskID, capability)
+}
+
+// SetBrowserHarnessEvidenceUploader replaces the attachment uploader so the
+// harness can assert on the bytes without a real server.
+func (d *Daemon) SetBrowserHarnessEvidenceUploader(upload func(ctx context.Context, workspaceID, issueID, filename string, data []byte) (string, error)) {
+	d.browserEvidenceUploader = upload
+}
+
 // registerBrowserRoutes wires the two planes into the health mux (SDD §3.2).
 func (d *Daemon) registerBrowserRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/browser/session", d.browserSessionHandler())
@@ -181,6 +211,18 @@ func (d *Daemon) browserHostOpenSessionHandler() http.HandlerFunc {
 			browserTransportError(w, http.StatusBadRequest, "task_id is required")
 			return
 		}
+		if err := validateBrowserTaskID(taskID); err != nil {
+			browserTransportError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// A task this daemon is not running has no recorded capability and no
+		// lifetime to bind to. Refusing is the whole point of the host plane
+		// being able to name a task: it may confirm, never invent.
+		if !d.browserTaskKnown(taskID) {
+			browserTransportError(w, http.StatusNotFound,
+				"this daemon is not running that task, so no browser session can be opened for it")
+			return
+		}
 		session, err := d.browserSessions.requestBrowserSession(activeRepoCheckoutTask{
 			TaskID:      taskID,
 			IssueID:     strings.TrimSpace(request.IssueID),
@@ -196,16 +238,31 @@ func (d *Daemon) browserHostOpenSessionHandler() http.HandlerFunc {
 }
 
 // browserCapabilityForTask reports whether the task's provider can carry the
-// HTTP MCP server. A task this daemon is not running has no recorded decision,
-// so it defaults to full: Desktop may still show the page for a manual QA pass,
-// and the agent-side tools stay absent for a provider that cannot host them.
+// HTTP MCP server.
+//
+// An unrecorded task answers `none`. The default used to be `full`, which let
+// any holder of the host secret open a session for an arbitrary task id and
+// receive the highest capability — turning the session's TaskID into a caller
+// declaration rather than a daemon-confirmed fact. `none` inverts that: an
+// unknown id yields a session whose tools all refuse to run.
 func (d *Daemon) browserCapabilityForTask(taskID string) string {
 	d.browserCapabilitiesMu.Lock()
 	defer d.browserCapabilitiesMu.Unlock()
 	if value := d.browserCapabilities[taskID]; value != "" {
 		return value
 	}
-	return browserCapabilityFull
+	return browserCapabilityNone
+}
+
+// browserTaskKnown reports whether this daemon is running the task, which is
+// the only fact that makes an id trustworthy. Desktop cannot open a session for
+// a task this daemon never claimed: there would be no provider to derive a
+// capability from, and no run whose lifetime the session should follow.
+func (d *Daemon) browserTaskKnown(taskID string) bool {
+	d.browserCapabilitiesMu.Lock()
+	defer d.browserCapabilitiesMu.Unlock()
+	_, ok := d.browserCapabilities[taskID]
+	return ok
 }
 
 // recordBrowserCapability remembers the provider decision for one task.

@@ -35,7 +35,6 @@ func newBrowserTestDaemon(t *testing.T) *Daemon {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", t.TempDir())
 	d.browserSessions = newBrowserSessionRegistry(logger)
-	d.browserSessions.cleanupInterval = time.Millisecond
 	d.browserHostSecretValue = "host-secret-value-that-is-long-enough"
 	d.browserEvidenceUploader = func(context.Context, string, string, string, []byte) (string, error) {
 		return "att_test", nil
@@ -49,8 +48,22 @@ func browserTestTask(taskID string) activeRepoCheckoutTask {
 	}
 }
 
+// quoteJSON renders a value as a JSON string literal for hand-built request
+// bodies, so a traversal payload cannot break the body's own syntax.
+func quoteJSON(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
 func registerBrowserTestTask(d *Daemon, token, taskID string) {
 	d.registerActiveRepoCheckoutTask(token, browserTestTask(taskID))
+	// A task this daemon is not running now answers capability=none and the
+	// host plane refuses to open a session for it, so every test that expects a
+	// usable session records the decision the claim path would have made.
+	d.recordBrowserCapability(taskID, browserCapabilityFull)
 }
 
 func browserJSONRequest(method, target, body string) *http.Request {
@@ -225,7 +238,7 @@ func TestBrowserEvidenceLengthSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	target := "/browser/host/evidence?session_id=" + session.ID + "&bytes=4&sha256=00"
@@ -345,7 +358,7 @@ func TestBrowserHeartbeatOrphansAndDoesNotResurrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	if _, ok := d.browserSessions.heartbeat(session.ID, 1, true, nil); !ok {
@@ -381,7 +394,7 @@ func TestBrowserHumanHardDeadlineClosesDespiteLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	if _, err := d.browserSessions.takeover(session.ID); err != nil {
@@ -403,51 +416,82 @@ func TestBrowserHumanHardDeadlineClosesDespiteLock(t *testing.T) {
 	}
 }
 
-// SDD §1 I6 / §4.2: cleanup is two-phase, retries a failed directory delete,
-// and only deletes the directory it recorded.
-func TestBrowserCleanupIsTwoPhaseAndRetries(t *testing.T) {
+// P1-4: the daemon owns no directory, so closing a session deletes nothing.
+//
+// The view's partition is non-persistent, so Chromium never writes a profile
+// directory for it. This test asserts the absence of a filesystem operation:
+// a directory that would previously have been the delete target must survive.
+func TestBrowserCleanupDeletesNoDirectory(t *testing.T) {
 	d := newBrowserTestDaemon(t)
-	root := t.TempDir()
-	partitionDir := filepath.Join(root, "qa-task-task-a")
-	if err := os.MkdirAll(partitionDir, 0o700); err != nil {
-		t.Fatalf("create partition dir: %v", err)
+	survivor := filepath.Join(t.TempDir(), "qa-task-dont-delete")
+	if err := os.MkdirAll(survivor, 0o700); err != nil {
+		t.Fatalf("create survivor dir: %v", err)
 	}
-	now := time.Now()
-	d.browserSessions.now = func() time.Time { return now }
 	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-a"), browserCapabilityFull)
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", partitionDir, true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 
-	closed, ok := d.browserSessions.closeBrowserSession(session.ID)
-	if !ok || closed.State != browserStateClosing {
-		t.Fatalf("close = %+v ok=%v, want closing", closed, ok)
+	if _, ok := d.browserSessions.closeBrowserSession(session.ID); !ok {
+		t.Fatal("close rejected a hosted session")
 	}
-	if _, err := os.Stat(partitionDir); err != nil {
-		t.Fatalf("the directory was removed before the host acked view destruction: %v", err)
-	}
-
-	// An ack deletes it and finalizes.
 	if _, ok := d.browserSessions.ackClosed(session.ID); !ok {
 		t.Fatal("ackClosed rejected a closing session")
 	}
-	if _, err := os.Stat(partitionDir); !os.IsNotExist(err) {
-		t.Fatalf("partition dir survived the two-phase cleanup: %v", err)
+	if _, statErr := os.Stat(survivor); statErr != nil {
+		t.Fatalf("cleanup touched the filesystem: %v", statErr)
+	}
+	if got := d.browserSessions.bySessionID(session.ID); got != nil {
+		t.Fatalf("session %s survived a completed cleanup", session.ID)
 	}
 }
 
-func TestBrowserProfileDirMustMatchTheSessionPartition(t *testing.T) {
-	if err := validateBrowserProfileDir(filepath.Join(t.TempDir(), "qa-task-task-b"), "qa-task-task-a"); err == nil {
-		t.Fatal("a directory from another session's partition was accepted for deletion")
+// P0-1: a task id is an identifier, never a path fragment.
+//
+// `..\..\..\Windows\Temp\victim` passed the old length check and made
+// filepath.Base(dir) == filepath.Base(partition) true, so the delete target
+// escaped the managed root while the guard still passed.
+func TestBrowserTaskIDRejectsPathTraversal(t *testing.T) {
+	traversal := `..\..\..\..\..\..\Windows\Temp\victim-dir`
+	if err := validateBrowserTaskID(traversal); err == nil {
+		t.Fatal("a path-traversal task id was accepted")
 	}
-	if err := validateBrowserProfileDir("relative/path", "qa-task-task-a"); err == nil {
-		t.Fatal("a relative browser host profile dir was accepted")
+	for _, bad := range []string{
+		"task/../../etc",
+		"task one",
+		"task\x00",
+		"",
+		strings.Repeat("a", 129),
+		"C:\\Windows",
+	} {
+		if err := validateBrowserTaskID(bad); err == nil {
+			t.Fatalf("task id %q was accepted", bad)
+		}
 	}
-	if err := validateBrowserProfileDir(filepath.Join(t.TempDir(), "qa-task-task-a"), "qa-task-task-a"); err != nil {
-		t.Fatalf("the session's own partition dir was rejected: %v", err)
+	for _, good := range []string{"task-a", "01a1db30e3947273a23530a8c30aa63c", "A_b-9"} {
+		if err := validateBrowserTaskID(good); err != nil {
+			t.Fatalf("task id %q was rejected: %v", good, err)
+		}
+	}
+}
+
+// P0-1: the partition carries no path semantics even for a valid id.
+func TestBrowserPartitionNameIsOpaque(t *testing.T) {
+	name := browserPartitionName("task-a")
+	if strings.Contains(name, "task-a") {
+		t.Fatalf("partition %q echoes the task id; it must be opaque", name)
+	}
+	if !strings.HasPrefix(name, "qa-task-") {
+		t.Fatalf("partition %q lost its prefix", name)
+	}
+	if name != browserPartitionName("task-a") {
+		t.Fatal("partition name is not deterministic; a repeat register would target a different partition")
+	}
+	if name == browserPartitionName("task-b") {
+		t.Fatal("two tasks share one partition; A2 isolation is broken")
 	}
 }
 
@@ -460,7 +504,7 @@ func TestBrowserLockEndpointsRequireHostSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	body := `{"session_id":"` + session.ID + `"}`
@@ -501,7 +545,7 @@ func TestBrowserToolCallSharesOneBudgetWithTheLockWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	if _, err := d.browserSessions.takeover(session.ID); err != nil {
@@ -629,7 +673,7 @@ func TestBrowserOrphanedSessionFailsToolCallsImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	// view_alive=false is what render-process-gone reports.
@@ -667,7 +711,7 @@ func TestBrowserHostPlaneRejectsWrongSecret(t *testing.T) {
 }
 
 // The host plane must not register a session onto a different task, and must
-// refuse a directory belonging to another partition.
+// ignore any path a caller volunteers.
 func TestBrowserHostRegisterValidatesTaskAndDirectory(t *testing.T) {
 	d := newBrowserTestDaemon(t)
 	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-a"), browserCapabilityFull)
@@ -681,11 +725,14 @@ func TestBrowserHostRegisterValidatesTaskAndDirectory(t *testing.T) {
 		t.Fatalf("register for another task = %d %s, want 403", otherTask.Code, otherTask.Body)
 	}
 
-	outsideDir := httptest.NewRecorder()
-	d.browserHostRegisterHandler()(outsideDir, browserHostRequest(http.MethodPost, "/browser/host/register",
+	// A `profile_dir` in the body is not part of the contract any more. It is
+	// ignored rather than validated: the daemon deletes nothing, so there is no
+	// path whose ownership it would have to police.
+	ignored := httptest.NewRecorder()
+	d.browserHostRegisterHandler()(ignored, browserHostRequest(http.MethodPost, "/browser/host/register",
 		`{"session_id":"`+session.ID+`","task_id":"task-a","profile_dir":"/tmp/not-this-partition"}`))
-	if outsideDir.Code != http.StatusBadRequest {
-		t.Fatalf("register with a foreign profile dir = %d %s, want 400", outsideDir.Code, outsideDir.Body)
+	if ignored.Code != http.StatusOK {
+		t.Fatalf("register with a stray profile_dir = %d %s, want 200", ignored.Code, ignored.Body)
 	}
 }
 
@@ -697,7 +744,7 @@ func TestBrowserCommandRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 
@@ -737,7 +784,7 @@ func TestBrowserSessionViewHidesQueryAndPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request session: %v", err)
 	}
-	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", "/tmp/qa-task-task-a", true); err != nil {
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	d.browserSessions.heartbeat(session.ID, 1, true, &browserSessionURL{Host: "127.0.0.1:3000", Path: "/dashboard?token=secret"})
@@ -756,6 +803,145 @@ func TestBrowserSessionViewHidesQueryAndPaths(t *testing.T) {
 
 // The host secret lives beside the profile's other files with 0600, and is
 // reused rather than regenerated on every daemon start.
+// P0-1 closure: a malicious task id is refused on every path that could reach
+// the registry or trigger cleanup, and nothing is deleted on any of them.
+//
+// The review's requirement was explicit: the register entry point alone is not
+// closure. So this drives open → register → DELETE → TTL sweep → ack and the
+// cleanup call directly, asserting 400/404, an empty registry, and a surviving
+// bystander directory at each step.
+func TestBrowserMaliciousTaskIDNeverReachesTheRegistry(t *testing.T) {
+	traversal := `..\..\..\..\..\..\Windows\Temp\victim-dir`
+	bystander := filepath.Join(t.TempDir(), "victim-dir")
+	if err := os.MkdirAll(bystander, 0o700); err != nil {
+		t.Fatalf("create bystander dir: %v", err)
+	}
+	sentinel := filepath.Join(bystander, "keep.txt")
+	if err := os.WriteFile(sentinel, []byte("must survive"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	assertNothingHappened := func(t *testing.T, d *Daemon) {
+		t.Helper()
+		if sessions := d.browserSessions.list(); len(sessions) != 0 {
+			t.Fatalf("registry holds %d sessions after a rejected id: %+v", len(sessions), sessions)
+		}
+		if _, statErr := os.Stat(sentinel); statErr != nil {
+			t.Fatalf("a directory outside the managed root was deleted: %v", statErr)
+		}
+	}
+
+	t.Run("host open is refused and records nothing", func(t *testing.T) {
+		d := newBrowserTestDaemon(t)
+		d.recordBrowserCapability(traversal, browserCapabilityFull) // even known, the id is invalid
+		rec := httptest.NewRecorder()
+		d.browserHostOpenSessionHandler()(rec, browserHostRequest(http.MethodPost, "/browser/host/session",
+			`{"task_id":`+quoteJSON(traversal)+`}`))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("open with a traversal task id = %d %s, want 400", rec.Code, rec.Body)
+		}
+		assertNothingHappened(t, d)
+	})
+
+	t.Run("task plane cannot open one either", func(t *testing.T) {
+		d := newBrowserTestDaemon(t)
+		d.registerActiveRepoCheckoutTask("mat_evil", browserTestTask(traversal))
+		d.recordBrowserCapability(traversal, browserCapabilityFull)
+		d.browserHostSeenAt.Store(time.Now().UnixNano())
+		rec := httptest.NewRecorder()
+		d.browserSessionHandler()(rec, browserTaskRequest(http.MethodPost, "/browser/session", "mat_evil", ""))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("task-plane create with a traversal task id = %d %s, want 400", rec.Code, rec.Body)
+		}
+		assertNothingHappened(t, d)
+	})
+
+	t.Run("delete, sweep, ack and retry touch no filesystem", func(t *testing.T) {
+		d := newBrowserTestDaemon(t)
+		now := time.Now()
+		d.browserSessions.now = func() time.Time { return now }
+
+		// A legitimate session proves the cleanup paths run: its close/ack/sweep
+		// must leave the bystander alone.
+		registerBrowserTestTask(d, "mat_ok", "task-ok")
+		session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-ok"), browserCapabilityFull)
+		if err != nil {
+			t.Fatalf("request session: %v", err)
+		}
+		if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+			t.Fatalf("register host: %v", err)
+		}
+
+		for _, mutate := range []func(){
+			func() { d.browserSessions.closeBrowserSession(session.ID) },
+			func() { d.browserSessions.ackClosed(session.ID) },
+			func() { now = now.Add(2 * time.Hour); d.browserSessions.sweep() },
+			func() { d.browserSessions.cleanupLocked(session) },
+			func() {
+				// The retry queue no longer exists; the call is idempotent.
+				if s := d.browserSessions.bySessionID(session.ID); s != nil {
+					d.browserSessions.cleanupLocked(s)
+				}
+			},
+		} {
+			mutate()
+			if _, statErr := os.Stat(sentinel); statErr != nil {
+				t.Fatalf("cleanup path deleted a path outside the managed root: %v", statErr)
+			}
+		}
+		assertNothingHappened(t, d)
+	})
+}
+
+// P1-3: a task this daemon is not running cannot obtain a usable session.
+func TestBrowserUnknownTaskCannotOpenASession(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	d.markBrowserHostSeen()
+
+	rec := httptest.NewRecorder()
+	d.browserHostOpenSessionHandler()(rec, browserHostRequest(http.MethodPost, "/browser/host/session",
+		`{"task_id":"never-claimed-here","issue_id":"i1","workspace_id":"ws"}`))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("open for an unknown task = %d %s, want 404", rec.Code, rec.Body)
+	}
+	if sessions := d.browserSessions.list(); len(sessions) != 0 {
+		t.Fatalf("a refused open left %d sessions behind", len(sessions))
+	}
+
+	// And the capability itself is `none`, not `full`, for an unrecorded task.
+	if got := d.browserCapabilityForTask("never-claimed-here"); got != browserCapabilityNone {
+		t.Fatalf("capability for an unknown task = %q, want none", got)
+	}
+}
+
+// P1-3: a session built for one task cannot be driven or taken over from
+// another task's credential.
+func TestBrowserCrossTaskAccessIsRefused(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	registerBrowserTestTask(d, "mat_a", "task-a")
+	registerBrowserTestTask(d, "mat_b", "task-b")
+	d.browserHostSeenAt.Store(time.Now().UnixNano())
+
+	create := httptest.NewRecorder()
+	d.browserSessionHandler()(create, browserTaskRequest(http.MethodPost, "/browser/session", "mat_a", ""))
+	sessionID := decodeBrowserResponse(t, create).Session.SessionID
+
+	// task-b's own token cannot read, close or take over task-a's session.
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		rec := httptest.NewRecorder()
+		d.browserSessionHandler()(rec, browserTaskRequest(method, "/browser/session?session_id="+sessionID, "mat_b", ""))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s of task-a's session as task-b = %d %s, want 403", method, rec.Code, rec.Body)
+		}
+	}
+	// Even the host plane will not retarget the lock onto a foreign session
+	// with a mismatched task: takeover has no task field to lie about, so the
+	// binding it relies on is the session's own TaskID.
+	if got := d.browserSessions.bySessionID(sessionID).TaskID; got != "task-a" {
+		t.Fatalf("session task = %q, want task-a: the binding must not be caller-controlled", got)
+	}
+}
+
 func TestBrowserHostSecretIsStableAndPrivate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -799,8 +985,107 @@ func TestBrowserURLSanitizerKeepsDisplayValueHarmless(t *testing.T) {
 	}
 }
 
-func TestBrowserURLForLogDropsQuery(t *testing.T) {
-	if got := browserURLForLog("http://127.0.0.1:3000/dash?token=secret#frag"); strings.Contains(got, "secret") || strings.Contains(got, "frag") {
-		t.Fatalf("log URL kept a query or fragment: %q", got)
+// P1-5: console text from the page under test must not reach either sink raw.
+//
+// There are two sinks — the agent's context (which the agent may paste into a
+// comment, and `CreateComment` does not redact) and the run transcript (which
+// records the provider's view of the same tool result). Both are fed by the
+// MCP response, so the daemon boundary is the one choke point that covers both;
+// this test asserts that for each sink independently.
+func TestBrowserConsoleIsRedactedForBothSinks(t *testing.T) {
+	d := newBrowserTestDaemon(t)
+	session, err := d.browserSessions.requestBrowserSession(browserTestTask("task-console"), browserCapabilityFull)
+	if err != nil {
+		t.Fatalf("request session: %v", err)
+	}
+	if _, err := d.browserSessions.registerBrowserHost(session.ID, "win", true); err != nil {
+		t.Fatalf("register host: %v", err)
+	}
+	leaked := []string{"abc123def456cookie", "mat_abcdefghijklmnopqrstuvwxyz012345"}
+	consoleText := "log: Cookie: session=abc123def456cookie; theme=dark\n" +
+		"log: token=mat_abcdefghijklmnopqrstuvwxyz012345"
+
+	// Start the per-task MCP server and let the host answer the console command.
+	config, set, err := startTaskBrowserMCP(context.Background(), d, "task-console", d.logger)
+	if err != nil || set == nil {
+		t.Fatalf("start browser MCP: config=%s err=%v", config, err)
+	}
+	defer set.Close()
+	var envelope struct {
+		MCPServers map[string]struct {
+			URL string `json:"url"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(config, &envelope); err != nil {
+		t.Fatalf("decode mcp config: %v", err)
+	}
+	mcpURL := envelope.MCPServers["multica-browser"].URL
+
+	var responseText string
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_console"}}`
+		response, postErr := http.Post(mcpURL, "application/json", strings.NewReader(body))
+		if postErr != nil {
+			t.Errorf("console tool call: %v", postErr)
+			return
+		}
+		defer response.Body.Close()
+		var decoded struct {
+			Result struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		if decodeErr := json.NewDecoder(response.Body).Decode(&decoded); decodeErr != nil {
+			t.Errorf("decode console result: %v", decodeErr)
+			return
+		}
+		if len(decoded.Result.Content) > 0 {
+			responseText = decoded.Result.Content[0].Text
+		}
+	}()
+
+	commands, _, err := d.browserSessions.takeCommands(context.Background(), session.ID, nil, 5*time.Second)
+	if err != nil || len(commands) != 1 {
+		t.Fatalf("take commands = %+v err=%v, want one console command", commands, err)
+	}
+	results := []browserCommandResult{{ID: commands[0].ID, OK: true, Text: consoleText}}
+	if _, _, err := d.browserSessions.takeCommands(context.Background(), session.ID, results, time.Second); err != nil {
+		t.Fatalf("deliver console result: %v", err)
+	}
+	wg.Wait()
+
+	if responseText == "" {
+		t.Fatal("the console tool returned nothing")
+	}
+	for _, secret := range leaked {
+		if strings.Contains(responseText, secret) {
+			t.Fatalf("MCP response carried %q verbatim: %s", secret, responseText)
+		}
+	}
+
+	// Chain 1 — console → issue comment. CreateComment only strips NUL bytes,
+	// so the text the agent now holds is what would be persisted; assert it is
+	// already safe before that sink ever sees it.
+	commentBody := "QA log excerpt:\n" + responseText
+	for _, secret := range leaked {
+		if strings.Contains(commentBody, secret) {
+			t.Fatalf("comment body would carry %q: %s", secret, commentBody)
+		}
+	}
+
+	// Chain 2 — console → transcript. toolOutputPreview sanitizes and truncates
+	// but deliberately does not redact (it serves every provider's tool output),
+	// which is why the boundary above is the control point: the preview is built
+	// from text that is already redacted.
+	preview, _ := toolOutputPreview(responseText)
+	for _, secret := range leaked {
+		if strings.Contains(preview, secret) {
+			t.Fatalf("transcript preview would carry %q: %s", secret, preview)
+		}
 	}
 }

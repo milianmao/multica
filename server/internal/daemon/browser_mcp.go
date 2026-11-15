@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/redact"
 )
 
 // QA built-in isolated browser: the `multica-browser` MCP tool surface.
@@ -282,8 +284,16 @@ func (s *browserMCPServer) handleCall(w http.ResponseWriter, r *http.Request, re
 		s.writeToolError(w, request.ID, err)
 		return
 	}
+	// The single choke point for everything a browser tool hands back.
+	//
+	// This is intentionally the daemon boundary and not the Desktop one: the
+	// console text originates in the page under test, so it is untrusted input,
+	// and this is the last place before it reaches two separate sinks — the
+	// agent's context (which the agent may write into a comment) and the
+	// transcript the provider echoes back to the daemon. Redacting here covers
+	// both; redacting at either sink alone leaves the other open.
 	writePluginHookMCPResult(w, request.ID, map[string]any{
-		"content": []map[string]any{{"type": "text", "text": text}},
+		"content": []map[string]any{{"type": "text", "text": redact.Text(text)}},
 	})
 }
 
@@ -294,7 +304,7 @@ func (s *browserMCPServer) writeToolError(w http.ResponseWriter, id json.RawMess
 	}
 	writePluginHookMCPResult(w, id, map[string]any{
 		"isError": true,
-		"content": []map[string]any{{"type": "text", "text": code + ": " + message}},
+		"content": []map[string]any{{"type": "text", "text": redact.Text(code + ": " + message)}},
 	})
 }
 

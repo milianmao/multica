@@ -450,3 +450,58 @@ func TestRedactMultipleSecrets(t *testing.T) {
 		t.Fatal("GitHub token not redacted in multi-secret text")
 	}
 }
+
+// A QA browser's console carries whatever the page under test printed, and that
+// text reaches two sinks — the agent's context and the run transcript — so the
+// patterns have to catch the credentials a page actually handles.
+func TestTextRedactsBrowserConsoleCredentials(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		input string
+		leaks []string
+		want  string
+	}{
+		{
+			name:  "request cookie header",
+			input: `fetch("/api", {headers: {"Cookie": "session=abc123def456; theme=dark"}})`,
+			leaks: []string{"abc123def456"},
+			want:  "[REDACTED COOKIE]",
+		},
+		{
+			name:  "set-cookie response header",
+			input: `Set-Cookie: session=zzzzzzzzzzzzzzzz; HttpOnly; Secure`,
+			leaks: []string{"zzzzzzzzzzzzzzzz"},
+			want:  "[REDACTED COOKIE]",
+		},
+		{
+			name:  "task token printed by a page",
+			input: `token=mat_abcdefghijklmnopqrstuvwxyz012345`,
+			leaks: []string{"mat_abcdefghijklmnopqrstuvwxyz012345"},
+			want:  "[REDACTED AGENT PASS]",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Text(tc.input)
+			for _, leak := range tc.leaks {
+				if strings.Contains(got, leak) {
+					t.Fatalf("credential survived redaction: %q -> %q", tc.input, got)
+				}
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("expected %s placeholder, got: %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// The header name must survive: an operator reading a comment needs to know a
+// cookie was there, only not its value.
+func TestTextKeepsTheCookieHeaderName(t *testing.T) {
+	t.Parallel()
+	got := Text("Cookie: session=secret-value")
+	if !strings.HasPrefix(got, "Cookie: ") {
+		t.Fatalf("cookie header name was lost: %q", got)
+	}
+}

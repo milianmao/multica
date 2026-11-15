@@ -11,7 +11,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -238,6 +237,10 @@ func (d *Daemon) browserSessionCreate(w http.ResponseWriter, r *http.Request) {
 	capability := d.browserCapabilityForTask(task.TaskID)
 	session, err := d.browserSessions.requestBrowserSession(task, capability)
 	if err != nil {
+		if errors.Is(err, errBrowserInvalidTaskID) {
+			browserTransportError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeBrowserError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
@@ -393,11 +396,10 @@ func (d *Daemon) browserHostRegisterHandler() http.HandlerFunc {
 			return
 		}
 		var request struct {
-			SessionID  string `json:"session_id"`
-			TaskID     string `json:"task_id"`
-			WindowID   string `json:"window_id"`
-			ProfileDir string `json:"profile_dir"`
-			CDPReady   bool   `json:"cdp_ready"`
+			SessionID string `json:"session_id"`
+			TaskID    string `json:"task_id"`
+			WindowID  string `json:"window_id"`
+			CDPReady  bool   `json:"cdp_ready"`
 		}
 		if err := json.Unmarshal(body, &request); err != nil {
 			browserTransportError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -412,11 +414,11 @@ func (d *Daemon) browserHostRegisterHandler() http.HandlerFunc {
 			browserTransportError(w, http.StatusForbidden, "session does not belong to the reported task")
 			return
 		}
-		if err := validateBrowserProfileDir(request.ProfileDir, session.Partition); err != nil {
-			browserTransportError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		updated, err := d.browserSessions.registerBrowserHost(session.ID, request.WindowID, request.ProfileDir, request.CDPReady)
+		// No directory is accepted here: the view's partition is non-persistent,
+		// so the daemon owns no path and deletes nothing. A caller-supplied
+		// `profile_dir` used to be the input to `os.RemoveAll`; with the
+		// argument gone, so is the attack surface.
+		updated, err := d.browserSessions.registerBrowserHost(session.ID, request.WindowID, request.CDPReady)
 		if err != nil {
 			status := http.StatusConflict
 			if errors.Is(err, errBrowserUnknownSession) {
@@ -459,6 +461,10 @@ func (d *Daemon) browserHostHeartbeatHandler() http.HandlerFunc {
 			browserTransportError(w, http.StatusBadRequest, "session_id is required")
 			return
 		}
+		// Heartbeat is the one call Desktop cannot skip, so it refreshes the
+		// host-seen clock the task plane uses to answer BROWSER_HOST_OFFLINE.
+		// Leaving it out made "is a host online" depend on call ordering.
+		d.markBrowserHostSeen()
 		var reportedURL *browserSessionURL
 		if request.URLHost != "" {
 			reportedURL = &browserSessionURL{Host: sanitizeBrowserURLPart(request.URLHost), Path: sanitizeBrowserURLPart(request.URLPath)}
@@ -670,17 +676,4 @@ func sanitizeBrowserURLPart(value string) string {
 		}
 	}
 	return b.String()
-}
-
-// browserURLForLog strips query values from a URL for logging; query strings
-// may carry one-time tokens.
-func browserURLForLog(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	parsed.User = nil
-	return parsed.String()
 }
