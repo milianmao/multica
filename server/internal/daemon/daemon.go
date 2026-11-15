@@ -732,6 +732,26 @@ type Daemon struct {
 	// task's issue. Nil when the daemon has no workspaces root.
 	environments *environmentService
 
+	// browserSessions owns the QA built-in browser's sessions: state, the
+	// takeover lock, the TTLs and the two-phase cleanup. Purely in memory —
+	// a daemon restart closes every session by definition (SDD §2).
+	browserSessions *browserSessionRegistry
+	// browserEvidenceUploader stores a captured PNG and returns its
+	// attachment id; injected so tests never reach the network.
+	browserEvidenceUploader browserEvidenceUploader
+	// browserHostSecretPath/Value hold the per-profile credential Desktop
+	// presents on the host plane. The value never travels over HTTP and never
+	// enters a log line (SDD §3.1).
+	browserHostSecretPath  string
+	browserHostSecretValue string
+	// browserHostSeenAt is the last host-plane contact, in UnixNano. The task
+	// plane answers BROWSER_HOST_OFFLINE from it (D3: hard error, no queue).
+	browserHostSeenAt atomic.Int64
+	// browserCapabilities records a task's provider decision so a Desktop-
+	// opened session can report capability=none instead of failing silently.
+	browserCapabilitiesMu sync.Mutex
+	browserCapabilities   map[string]string
+
 	// localPathLocks serialises agent tasks whose project resource is a
 	// local_directory pinned to this daemon. Two tasks targeting the same
 	// on-disk path run sequentially; the second blocks on the lock and is
@@ -2172,6 +2192,8 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	// "starting" until d.ready is set after preflight, so a slow or *failing*
 	// preflight is never misreported as a started daemon. resolveAuth has
 	// already run, so a missing token still fails fast before we begin serving.
+	d.initBrowserSessions()
+	go d.browserSessions.runBrowserSessionSweeper(ctx, defaultBrowserSweepInterval)
 	go d.serveHealth(ctx, healthLn, time.Now())
 
 	// Renew the PAT before the first API call, then do the initial
@@ -8291,6 +8313,42 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			taskLog.Warn("could not merge plugin hook MCP config", "error", mergeErr)
 		} else {
 			remoteMCPConfig = merged
+		}
+	}
+
+	// QA built-in browser tools (ORIO-7). Injected unconditionally for a task
+	// the server flagged, before the CLI starts, with an inert endpoint: a task
+	// that never opens a session gets BROWSER_SESSION_UNAVAILABLE from the
+	// tools rather than an agent that cannot find them (SDD §8).
+	//
+	// The capability is recorded first because the session view has to say
+	// "this provider cannot host the browser" instead of the sidebar offering a
+	// button that does nothing.
+	browserCapability := browserCapabilityNone
+	if task.QABrowserTools && task.Agent != nil && providerSupportsRemoteMCPBroker(provider) {
+		browserCapability = browserCapabilityFull
+	}
+	d.recordBrowserCapability(task.ID, browserCapability)
+	defer d.forgetBrowserCapability(task.ID)
+	if browserCapability == browserCapabilityFull {
+		browserMCPConfig, browserMCPServer, browserMCPErr := startTaskBrowserMCP(ctx, d, task.ID, taskLog)
+		if browserMCPErr != nil {
+			taskLog.Warn("browser tools unavailable", "error", browserMCPErr)
+		}
+		if browserMCPServer != nil {
+			defer browserMCPServer.Close()
+		}
+		// Fold through mergeTaskRemoteMCPConfig rather than the agent-config
+		// merge: the latter early-returns on a nil agent config and would drop
+		// this overlay silently. Base stays whatever the task already has, so a
+		// user's own MCP servers are never displaced.
+		if len(browserMCPConfig) > 0 {
+			merged, mergeErr := mergeTaskRemoteMCPConfig(remoteMCPConfig, browserMCPConfig)
+			if mergeErr != nil {
+				taskLog.Warn("could not merge browser MCP config", "error", mergeErr)
+			} else {
+				remoteMCPConfig = merged
+			}
 		}
 	}
 	if task.Agent != nil {
