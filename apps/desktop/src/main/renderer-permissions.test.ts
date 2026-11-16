@@ -69,6 +69,26 @@ describe("installRendererPermissionPolicy", () => {
     expect(check({}, "clipboard-read", RENDERER, { requestingUrl: RENDERER })).toBe(true);
   });
 
+  it("denies clipboard-read from a foreign document", () => {
+    // The permission is an allowlist entry, not an unconditional pass: a QA
+    // browser view or any other frame must not reach the clipboard through it.
+    const { request, check } = install();
+
+    expect(requested(request, "clipboard-read", { requestingUrl: FOREIGN })).toBe(false);
+    expect(requested(request, "clipboard-read", { requestingUrl: "file:///tmp/notes.html" })).toBe(false);
+    expect(check({}, "clipboard-read", FOREIGN, { requestingUrl: FOREIGN })).toBe(false);
+    // The check hook's origin argument alone is a trusted source; a foreign one is not.
+    expect(check({}, "clipboard-read", "https://evil.example", {})).toBe(false);
+  });
+
+  it("denies clipboard-read when no source can be determined", () => {
+    const { request, check } = install();
+
+    expect(requested(request, "clipboard-read", {})).toBe(false);
+    expect(requested(request, "clipboard-read", null)).toBe(false);
+    expect(check({}, "clipboard-read", "", {})).toBe(false);
+  });
+
   it("denies the same audio request from a foreign document", () => {
     const { request, check } = install();
 
