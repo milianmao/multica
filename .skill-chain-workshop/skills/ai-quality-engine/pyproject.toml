@@ -1,0 +1,30 @@
+# ai-quality-engine skill 自包含引擎的独立 pyproject
+#
+# 目的：让本 skill 换任意电脑/环境即可运行，不依赖本仓库（evaluate-ai-code-service）。
+# 两种运行方式：
+#   1. 零安装（推荐）：在 skill 目录下 `python3 -m ai_quality ...`（仅需 pydantic）
+#   2. pip 安装为 CLI：`pip install .` 后 `ai-quality ...`（经 [project.scripts]）
+#
+# 本包即 ai-quality-check 发行版的离线引擎内核（ai_quality 包），
+# 与 evaluate-ai-code-service/backend 双库同步，仅依赖 pydantic（核心 check/判定路径）。
+# fastapi/cryptography 属在线平台 web 可选依赖，本 skill 判定场景不触碰。
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-quality-engine"
+version = "0.7.4"
+description = "AI Coding 业务正确性判定引擎（code-verified Profile）——工坊链判定层，消费 contract/scenario oracle manifest 落锤"
+readme = "SKILL.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+ai-quality = "ai_quality.cli.entry:main"
+
+[tool.setuptools.packages.find]
+include = ["ai_quality*"]

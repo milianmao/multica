@@ -3,6 +3,9 @@ productName: Multica
 directories:
   buildResources: build
 files:
+  # Local endpoint files are build inputs, never distributable application data.
+  - "!**/.env"
+  - "!**/.env.*"
   - "!**/.vscode/*"
   - "!src/*"
   - "!electron.vite.config.*"

@@ -12,13 +12,16 @@ function requireRuntimeAppUrl(): string {
   return runtimeConfig.config.appUrl;
 }
 
+/** Launch browser OAuth with the return destination of this desktop build. */
 export function DesktopLoginPage() {
   const webUrl = requireRuntimeAppUrl();
+  /** Keep the browser handoff on this build's registered deep-link protocol. */
   const handleGoogleLogin = () => {
-    // Open web login page in the default browser with platform=desktop flag.
-    // The web callback will redirect back via multica:// deep link with the token.
+    const platform = window.desktopAPI.appProtocol === "multica-local"
+      ? "desktop-local"
+      : "desktop";
     window.desktopAPI.openExternal(
-      `${webUrl}/login?platform=desktop`,
+      `${webUrl}/login?platform=${platform}`,
     );
   };
 

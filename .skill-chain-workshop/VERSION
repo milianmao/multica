@@ -1,0 +1,222 @@
+# Skill 编排工坊 — 全局版本管理
+#
+# 全局版本号：表示整个 Skill 工厂体系的迭代版本。
+# 全局版本升级时意味着一次对多个 Skill 的协同变更。
+#
+# 命名规则：MAJOR.MINOR.PATCH
+#   MAJOR — 新增 Skill 层、架构性重构（如新增安全层）
+#   MINOR — 跨 Skill 的协同增强（如 SubAgent 隔离 + 契约 wiring）
+#   PATCH — 单 Skill 或小协同改动（默认自动叠加等级）
+#
+# 默认规则：用户没明示大版本时，默认走 PATCH（v4.7.1 → v4.7.2 自动叠加）
+# 只有用户明确说"4.8"/"5.0"等 MINOR/MAJOR 时才升级。
+#
+# 子版本号：每个 Skill 自身在 skills/<name>/SKILL.md frontmatter
+# 的 version 字段中独立管理。子版本号升级意味着该 Skill 自身
+# 的能力增强（如新增 Phase/Step、新增检测规则）。
+
+4.11.1
+
+# 各 Skill 子版本对应（v4.11.1 全局版本下的实际子版本）
+# ----------------------------------------------------
+# feat-design-planning                3.9  (+契约格式强制:`### METHOD /path`+请求/响应 fence JSON 块,Phase 2 末 extractor 自证 ratio≥0.80; 纯前端/纯后端用 --no-sdd 显式声明)
+# team-rigorous-delivery              3.8  (+Mini-7b 渐进式披露到 e2e-excellence)
+# deep-planning-rigorous-validation   3.11 (+阶段8f 唯一调用 business-quality-gate.py; --no-sdd/--changed-files 分支)
+# knowledge-base-builder              1.3.1 (+Step 9.2 受控 lesson 晋升边界说明)
+# test-pyramid-builder                1.1
+# fix-bug-workflow                    1.6.4 (+Step 9.2 受控 lesson 晋升: 脱敏+Phase E PASS+确认后定点回灌 06)
+# sensitive-info-filter               1.2 (+Step 9.2 晋升前复扫 + hash-only promotion audit)
+# impact-driven-test                  1.0
+# query-knowledge                     1.2  (+predev lesson status/kb_entry 元数据 + rejected/superseded 过滤 + legacy 兼容)
+# e2e-excellence                     2.2  (新增: 浏览器 E2E 验证方法论 - 10 项 Gate 门禁 + 验证路线 + 被调用接口 + Gate waiver 机制)
+# deploy-run                          1.0  (项目本地 skill；位置变更 skills/ -> .claude/skills/ 留独立 commit)
+# contract-oracle-extractor           0.7.1 (业务验证·契约生成层: schema-only 证据不独立宣布 code-verified PASS)
+# scenario-oracle-builder             0.7.1 (业务验证·场景生成层: schema/Mock 生成测试不等于真实 API 验证)
+# ai-quality-engine                   0.7.5 (业务验证·判定层: 唯一业务质量门禁入口 business-quality-gate.py 严格 PASS/BLOCK)
+
+# v4.11.1 变更 (2026-08-13):
+#   契约断点收口：纯前端/纯后端链路、SDD 归属校验、target 防漏检、KB/Scenario 语义对齐
+#   - business-quality-gate.py：新增 --no-sdd（纯前端/纯后端显式声明无跨端契约，契约 manifest
+#     标记 declared_skipped，不产生 O-CONTRACT-GAP，但 KB + 真实验证器仍必须）；--sdd 校验 H1
+#     版本号与目录 docs/vX.Y.Z/ 一致（防旧版本契约当本轮证据）；--changed-files 校验本轮业务
+#     入口改动都已列入 --target（防漏检）
+#   - ai-quality-engine oracle_rules：识别 declared_skipped 契约 manifest（不触发 contract_violation）
+#   - scenario-oracle-builder extract.py：异常路径含边界语义（降级/超时/冲突等）并入 boundary_cases，
+#     提升测试覆盖精度，不改 covered 判据（trigger+dataflow+error 三项）
+#   - knowledge-base-builder / scenario-oracle-builder SKILL：明确 covered 判据与边界增强字段语义
+#   - feat-design-planning / fix-bug-workflow / deep-planning SKILL：--no-sdd / --changed-files 分支说明
+
+# v4.11 变更 (2026-08-13):
+#   业务质量门禁统一 + 受控 Bug lesson 晋升（「验证 → 沉淀 → 复用」闭环）
+#   主题一 · 业务质量门禁统一（唯一 PASS/BLOCK 出口）:
+#   - 新增 business-quality-gate.py 统一编排：从唯一 SDD + KB 业务流目录 + 目标代码生成隔离
+#     证据，要求真实业务验证，唯一 PASS(exit 0)/BLOCK(exit 3)；schema-only 固定 BLOCK
+#   - ai-quality-engine 0.7.4→0.7.5、deep-planning 3.10→3.11、contract-oracle-extractor
+#     0.7.0→0.7.1、scenario-oracle-builder 0.7.0→0.7.1：阶段8f/Phase E 只允许调该统一门禁
+#   主题二 · 受控 lesson 晋升（即时经验→长期 KB 摘要）:
+#   - fix-bug-workflow 1.6.3→1.6.4：新增 scripts/promote_lesson.py——脱敏+Phase E PASS+确认
+#     后幂等摘要回灌 06-迭代与变更/已知问题与陷阱.md；03 业务流保持 fail-closed（须新 run 重验）
+#   - query-knowledge 1.1→1.2：predev 解析 lesson frontmatter，透传 status/kb_entry，排除
+#     rejected/superseded，无 frontmatter 历史 lesson 按 legacy 兼容
+#   - knowledge-base-builder 1.3→1.3.1、sensitive-info-filter 1.1→1.2：边界/复扫说明同步
+#   - promote_lesson.py 支持 --dry-run（预览不落盘）+ --migrate（存量 lesson 补 legacy 标记）
+#   - query-knowledge predev 的 exclude_statuses 可在 .query-knowledge.yml 覆盖（默认 rejected/superseded）
+#   - fix-bug Step 9.1 采纳留痕：对命中 lesson 记「已采用/不适用+理由」
+#   - 驱动缺陷: Bug 经验只被 predev 全文检索、无法经验证后回流长期 KB（学习闭环单向）
+
+# v4.10.4 变更 (2026-08-12):
+#   门禁引擎指向本项目 skill 自带副本（判定层自包含闭环）
+#   - ai-quality-engine v0.7.3 → v0.7.4：新增 `scripts/ai-quality-check.py` 门禁入口（对称生成层
+#     extract.py，任何 cwd 都命中本项目 skill 内引擎副本），deep-planning 阶段8f / fix-bug Phase E
+#     命令从 pip 全局 `ai-quality` CLI 改为该入口 —— 消除「门禁判定跑外部项目引擎」风险
+#   - deep-planning v3.9 → v3.10、fix-bug v1.6.1 → v1.6.2：阶段8f / Phase E 判定入口指向本项目
+#     skill 自带引擎（`python3 skills/ai-quality-engine/scripts/ai-quality-check.py`），SKILL.md
+#     新增「不要用外部 pip 全局 ai-quality CLI」警告 + 运行方式三选一（scripts 入口=门禁推荐）
+#   - pyproject.toml version 0.7.2 → 0.7.4（与 SKILL.md frontmatter 对齐，修复漂移）
+#   - 端到端实证: `scripts/ai-quality-check.py check` 从项目根跑 v6.31.0 → effective_profile=
+#     code-verified + valid + 无 O-*（PASS）；v6.30.0 → O-CONTRACT-GAP + O-SCENARIO-GAP（FAIL）
+#   - 驱动缺陷: 门禁曾调 pip 全局 `ai-quality` CLI（import backend.*，指向 evaluate-ai-code-service
+#     另一项目）→ 换机/换环境门禁判定跑错引擎；自包含引擎 skill 应随 skill 分发、不依赖外部仓库
+
+# v4.10.3 变更 (2026-08-12):
+#   ai-quality-engine v0.7.2 → v0.7.3：修 scenario manifest schema drift（判定层读错生成层产物）
+#   - 双重 drift: engine 读 `scenarios` 键 + 判 `== "gap"`，builder 实际写 `flows` 键 +
+#     `covered/partial_parse/unparseable` 状态 → O-SCENARIO-GAP 永不触发 → partial_parse 流
+#     静默放行（scenario 假绿；实测 v6.30.0 5 条 partial_parse 流全被放行）
+#   - 修复: 读 `flows`（回退旧 `scenarios` 兼容）+ 仅 `covered` 视为覆盖，其余皆缺口（fail-closed）
+#   - SKILL.md 新增「Oracle manifest schema 契约」段（contracts/flows 两键表 + fail-closed 原则，
+#     防再 drift）；测试 fixture 改造成真实 builder schema + 补旧协议向后兼容用例（6 绿）
+#   - 端到端实证: v6.30.0（5 partial_parse）→ 5 条 O-SCENARIO-GAP；v6.31.0（16 covered）→ 0 误报
+#   - 驱动缺陷: 生成层/判定层两 Skill 独立演进，schema 无机械契约对齐 → 判定层读不到生成层
+#     产物仍"判定成功"（假绿）
+
+# v4.10.2 变更 (2026-08-12):
+#   feat-design-planning v3.8 → v3.9：契约格式强制（堵历史版本 O-CONTRACT-GAP——契约"内容完整
+#   但机器不可解析"）
+#   - API 端点 heading 必须 `### METHOD /path`（heading 紧跟 METHOD，无编号/中文前缀/反引号）
+#   - 请求/响应必须为 fence 内 JSON 示例块（marker：请求体/请求参数/成功响应/响应体），文字列表
+#     不合格（extractor 推断不出 schema → gap）
+#   - Phase 2 末新增「契约可解析自证」：跑 contract-oracle-extractor，endpoints > 0 且
+#     coverage.ratio ≥ 0.80 方可进 Phase 3，不得带 gap 进入
+#   - 2.3 自检清单新增 2 项格式检查（heading 可解析 + extractor 自证通过）
+#   - 驱动缺陷: 历史契约 v6.31.0 文字列表写请求参数 → extractor ratio 0.0 → code-verified FAIL；
+#     补 JSON 块 → ratio 1.0 → PASS（2026-08-12 补跑实证）；设计阶段只查内容完整不查机器可解析
+
+# v4.10.1 变更 (2026-08-12):
+#   门禁机械落地（v0.7.2 业务验证层「执行 Agent 漏跑 8f」事故治本）— 两 Skill 门禁防漏跑
+#   - deep-planning-rigorous-validation v3.8 → v3.9：阶段8f 计入硬性门禁清单（执行规则区新增
+#     条目，08-gates.md 手写清单漂移不再漏 8f）+ 判定结果强制写回 08-gates.md（未写回=未执行）
+#     + SubAgent 进度报告带阶段8e/8f 门禁行（上下文隔离看不到门禁）+ 严格判据唯一不可豁免
+#     （删除宽松模式裁量口）
+#   - fix-bug-workflow v1.6.0 → v1.6.1：Phase E 业务质检门禁机械落地——前置判据用 find 不用
+#     glob（glob 无匹配报错误判文档不存在）+ 纯判定/纯前端修改也必跑（证明业务流未被破坏）
+#     + Phase E 不随 Step 6 跳过（独立门禁）+ tests/contract|scenario|oracle manifest 缺失
+#     即视为未执行质检 + 结果强制留痕 06-smoke-test.md
+#   - 驱动缺陷: 门禁清单靠手写会漂移；门禁靠执行者自觉非机械落地；SubAgent 上下文隔离挡住
+#     门禁信息；严格/宽松判据存在裁量口 → 执行 Agent 可「合法遗漏」业务质检门禁
+
+# v4.10.0 变更 (2026-08-08):
+#   跨 Skill 协同增强：业务验证层（code-verified Profile 质检门禁）— 生成层 + 判定层
+#   - 新增 3 个 Skill（业务验证层，第 12/13/14 个工坊协议型模块）：
+#     · contract-oracle-extractor（v0.7.0，生成层·契约）: 解析 feat-design-planning Phase 2
+#       SDD 契约规范 → 生成 Contract Test（pytest+jsonschema）+ oracle-manifest.json
+#       （schema_version=contract-oracle-v1，coverage ≥ 80%，gap → O-CONTRACT-GAP）
+#     · scenario-oracle-builder（v0.7.0，生成层·场景）: 解析 KB 业务流（03-核心数据业务流.md）
+#       → 生成 Scenario Test（happy/error/boundary 三分支）+ scenario-manifest.json
+#       （schema_version=scenario-oracle-v1，coverage ≥ 90%，Mock 天花板 → O-MOCK-CEILING）
+#     · ai-quality-engine（v0.7.2，判定层）: 本地 CLI `ai-quality check --profile code-verified`
+#       （pip editable，非服务），EvidenceManifest 注入证据 → OracleRulesEngine 产出
+#       O-CONTRACT-GAP / O-SCENARIO-GAP / O-MOCK-CEILING → ProfileGate 落锤（VALID / WITHHELD fail-closed）
+#   - 门禁接线：
+#     · deep-planning-rigorous-validation 阶段8f（业务验证审计 GATE）: 缺产物时现场生成 → 引擎落锤
+#     · fix-bug-workflow Step 6 Phase E（业务正确性质检门禁）: 代码修改完成后 ai-quality 严格判定
+#   - 严格判据 3 条（缺任一 → BLOCK）: effective_profile==code-verified + aggregate_status==valid
+#     + findings 无 O-*（业务断言零缺口）
+#   - 流水线 9 → 10 层（新增业务验证层），Skill 模块数 11 → 14
+#   - 驱动缺陷: 测试全绿 ≠ 业务通（v0.11.0 假绿教训——79 测试全绿、90% mock 了 stream_claude
+#     但功能完全不可用）；契约/场景测试依赖人工编写无机械生成；业务正确性无确定性落锤
+
+# v4.9.0 变更 (2026-07-23):
+#   跨 Skill 协同增强：E2E 验证方法论统一 + 渐进式披露协作模式
+#   - 新增 e2e-excellence Skill（第 11 个工坊协议型模块）- 浏览器端 E2E 验证方法论
+#     · 10 项 Gate 门禁（配置 7 + 验证能力 3）：webServer/trace/video/reuseExistingServer/
+#       retries/expect.timeout/SKIP_AUTOSTART + 验证策略分层/selector 鲁棒性/断言质量
+#     · 验证路线 8 步：Gate 门禁 -> 回归测试 -> 跑测试 -> trace/video 证据 -> 失败定位
+#     · v2.1 被调用接口：支持 fix-bug/deep-planning/team-rigorous 渐进式披露调用
+#     · v2.2 Gate waiver 机制：豁免 pre-existing Gate 失败项（CI 模式禁用）
+#     · e2e_doctor.py 门禁工具（PASS/FAIL/WARN/WAIVED 四状态，不打分）
+#     · 4 个 AI 增强工具按需引用：Midscene.js/Stagehand/Vouch/Slapwright
+#   - fix-bug-workflow v1.5.0 -> v1.6.0：Step 5 浏览器验证渐进式披露到 e2e-excellence
+#     · 入口契约（验证目标/范围/预期/返回位置/gate_waiver）-> e2e-excellence -> 出口契约回 Step 7
+#   - deep-planning-rigorous-validation v3.7 -> v3.8：阶段 7b UI E2E 渐进式披露到 e2e-excellence
+#   - team-rigorous-delivery v3.7 -> v3.8：Mini-7b Slice UI E2E 并行渐进式披露到 e2e-excellence
+#   v2.2 Gate Waiver 机制（核心新增）：
+#   - 入口契约可选 gate_waiver 字段：声明 pre-existing Gate 失败项豁免
+#   - e2e_doctor.py --waiver 参数：命中的 FAIL/WARN 改 WAIVED，不阻塞
+#   - CI 模式禁用 waiver（CI=true 时强制真修）
+#   - 4 状态门禁：PASS / WARN / FAIL / WAIVED（原 3 状态）
+#   - 联动验证：planner-model bug 修复 E2E 验证 3 契约全 PASS + 修复 5 个弱断言
+
+# v4.8.3 变更 (2026-07-20):
+#   新增 deploy-run Skill（第 10 个模块）— 已交付前后端项目的本地启动/操作/关闭
+#   - 9 个原子子命令：detect / start / list / status / logs / open / stop / restart / doctor
+#   - 25 个 unittest（mock subprocess，无需真实 node/python 即可跑）
+#   - 4 个 benchmark case（DRE-E-001/002 + DRE-M-001/002）+ 6 个 mutation
+#   - detection_rate 50%：SIGTERM 优雅停止/端口冲突不静默/不改项目源码 3 项已机械守护
+#   - 强约束：SIGTERM_5S 优雅停止 / 端口冲突报告后退出 / 不修改项目源码 / 不假装启动
+#   - 状态持久化到 .runtime/deploy-registry.json（原子写）；日志 .runtime/deploy/<name>/<role>.log
+#   - L1/L2/L3 三级降级语义对齐本仓库（缺 manifest → 不报错 / 缺 node/python → exit 2 / 端口冲突 → 不自动 kill）
+#   v5 control_plane 集成：
+#   - 新增 control_plane/deploy_runtime/ 适配层（REPO_PATH=... 描述符协议 + 14 个 unit test）
+#   - 新增 control_plane/api/routes_deploy.py 5 个端点（GET/PUT/POST/POST/GET）
+#   - 新增 src/pages/DeployPanel.jsx React 组件，挂到 ProjectDetailPage 末尾
+#   - 不修改 Project 模型（避免 alembic migration），用 description 末尾 REPO_PATH= 协议
+
+# v4.8.2 变更 (2026-07-13):
+#   D2/T3 修复 - query-knowledge 缓存层 + 跨 Skill 检索消重
+#   - query-knowledge v1.0→v1.1: 新增 kb-aware 子命令（一次 overview+search + KB 内容
+#     hash 缓存），task_id 白名单防路径穿越，缓存上限 50 条 FIFO 淘汰，8 个测试
+#   - deep-planning-rigorous-validation v3.6→v3.7: 前置 KB 感知改调 kb-aware，
+#     消除与 team 的重复调用，每条链路节省 ~4-6k tokens
+#   - team-rigorous-delivery v3.6→v3.7: Stage 0 同步改调 kb-aware，对齐 deep-planning
+
+# v4.8.1 变更 (2026-07-06):
+#   跨 4 个 Skill 的小协同增强 — 默认 PATCH 自动叠加等级
+#   - feat-design-planning v3.7→v3.8: Phase 4 任务格式强制 `- [ ]` checkbox
+#     格式（涉及文件/需求覆盖/验证点三字段必填），对齐 superpowers 追踪模式
+#   - deep-planning-rigorous-validation v3.4→v3.5: 阶段5 初始化执行看板
+#     (TaskCreate 逐条注册规划任务)，阶段6 完成后回写 `- [x]` + 时间戳
+#   - team-rigorous-delivery v3.5→v3.6: Stage 5.1 Main Agent 初始化看板 +
+#     Mini-6 SubAgent 回写 + Result Contract 报告任务完成状态
+#   - fix-bug-workflow v1.4→v1.4.2: 错题本路径统一到 `.claude/artifacts/bugs/`
+#     (single source of truth，对齐 query-knowledge predev 后端) + Step 7
+#     强制"同时写入两份"硬规则 + 修复报告 ↔ 错题本 双向链接契约 +
+#     Step 0.5 命中同类经验必须引用回原 lesson.md
+#   - fix-bug-workflow v1.4.2→v1.4.3 (2026-07-07): Post-mortem 新增"H1 是真根因
+#     还是表象根因"强制反思问题，修补错题本污染盲区（现有 red-capable + Step 5
+#     熔断只验证症状消失，不验证沉淀根因质量；错题本会教下次 AI 也修表象）
+
+# v4.8.0 变更 (2026-07-05):
+#   - query-knowledge 新增第 9 个 Skill（检索层）
+#   - 6 个 Skill 全部接入 query-knowledge 统一检索入口
+#   - 7→8 层流水线（新增检索层）
+#   - 知识检索 Token 节省 90%+
+
+# v4.7 变更:
+#   - fix-bug-workflow v1.2→v1.4: Step 1 hybrid 升级（systematic-debugging 4 Phase
+#     骨架 + diagnosing-bugs 3 个补丁:强制 red-capable 循环/4 checklist/多假设 +
+#     内建 TDD）+ Step 3 开头新增 Seam + Anti-pattern 子检查（4 条 checklist：Seam
+#     确认/实现耦合/同义反复/横向切片）。抗重构率从 60-70% 提升至 ≥85%
+#     来源：A/B 测试在沙箱 /tmp/sandbox-test/benchmark/ 上跑出结果，4 个并行
+#     Workflow Agent 量化对比 systematic-debugging（4 Phase 系统化框架）vs
+#     diagnosing-bugs（强制 red-capable 循环）的覆盖维度
+
+# v4.6 变更:
+#   - feat-design-planning v3.4→v3.5: 新增 Phase 5.2 Adversarial Review,
+#     用独立 Agent 做 L2/L3 分级对抗审查
+#   - team-rigorous-delivery v3.4→v3.5: 新增 Multi-Wave Execution &
+#     Wave Gate, 主 Agent 每波之后做轻量契约完整性检查
+#   - fix-bug-workflow: 新增 Step 0.5 错题本经验检索 (从全局合并)
+
+# 注意：子版本号独立演进，不随全局版本号同步升级。
+# 只有当该 Skill 自身增加功能或改变行为时，才升级其子版本号。

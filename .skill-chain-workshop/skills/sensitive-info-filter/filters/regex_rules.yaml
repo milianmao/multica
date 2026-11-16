@@ -1,0 +1,104 @@
+# Sensitive Info Filter — 正则规则配置 (v1.1)
+# 可热更新。修改后无需改代码，重启 skill 即可生效。
+#
+# 格式:
+#   - name: 规则名称（唯一）
+#     pattern: 正则表达式
+#     severity: high | medium | low
+#     placeholder: 替换为的占位符
+#     needs_luhn: true/false（可选，是否需要 Luhn 二次验证）
+
+rules:
+  # ── PII (个人身份信息) ──
+  - name: 手机号(中国)
+    pattern: '\b1[3-9]\d{9}\b'
+    severity: medium
+    placeholder: '<REDACTED:手机号>'
+
+  - name: 身份证(中国)
+    pattern: '\b[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b'
+    severity: medium
+    placeholder: '<REDACTED:身份证>'
+
+  - name: 邮箱
+    pattern: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
+    severity: medium
+    placeholder: '<REDACTED:邮箱>'
+
+  # ── 金融 ──
+  - name: 银行卡(13-19位数字)
+    pattern: '\b\d{13,19}\b'
+    severity: medium
+    placeholder: '<REDACTED:银行卡>'
+    needs_luhn: true
+
+  # ── 网络 ──
+  - name: 内网IP
+    pattern: '\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168|127\.0\.0\.1)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+    severity: medium
+    placeholder: '<REDACTED:内网IP>'
+
+  # ── 高危凭证 ──
+  - name: AWS Access Key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    severity: high
+    placeholder: '<REDACTED:AWS_KEY>'
+
+  - name: GitHub Token (ghp_)
+    pattern: '\bghp_[A-Za-z0-9]{36}\b'
+    severity: high
+    placeholder: '<REDACTED:GITHUB_TOKEN>'
+
+  - name: OpenAI API Key
+    pattern: '\bsk-[A-Za-z0-9]{20,}\b'
+    severity: high
+    placeholder: '<REDACTED:OPENAI_KEY>'
+
+  - name: Anthropic API Key
+    pattern: '\bsk-ant-[A-Za-z0-9\-]{20,}\b'
+    severity: high
+    placeholder: '<REDACTED:ANTHROPIC_KEY>'
+
+  - name: Private Key Block
+    pattern: '-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----'
+    severity: high
+    placeholder: '<REDACTED:PRIVATE_KEY_BLOCK>'
+
+  - name: JWT Token
+    pattern: '\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b'
+    severity: high
+    placeholder: '<REDACTED:JWT>'
+
+# 全局配置
+config:
+  entropy_threshold: 4.5
+  entropy_min_length: 32
+  scan_extensions:
+    - .md
+    - .ts
+    - .tsx
+    - .js
+    - .jsx
+    - .py
+    - .go
+    - .java
+    - .kt
+    - .swift
+    - .rs
+    - .txt
+    - .yaml
+    - .yml
+    - .json
+  skip_files:
+    - .env
+    - ".env.*"
+    - .pem
+    - .key
+    - .p12
+    - id_rsa
+    - credentials.json
+  skip_dirs:
+    - .git
+    - node_modules
+    - dist
+    - build

@@ -154,7 +154,12 @@ if (process.platform !== "win32") {
   ]);
 }
 
-const PROTOCOL = "multica";
+// Packaged metadata identifies Local before any sessions or instance locks exist.
+const IS_LOCAL_BUILD = !is.dev && app.getName() === "Multica Local";
+const APP_NAME = IS_LOCAL_BUILD ? "Multica Local" : "Multica";
+const APP_ID = IS_LOCAL_BUILD ? "ai.multica.desktop.local" : "ai.multica.desktop";
+const APP_HOME = join(homedir(), IS_LOCAL_BUILD ? ".multica-local" : ".multica");
+const PROTOCOL = IS_LOCAL_BUILD ? "multica-local" : "multica";
 const devLog = is.dev ? createBestEffortDevLog() : undefined;
 
 // Where the main process parks a freeze/crash breadcrumb until the next
@@ -699,7 +704,7 @@ function createIssueWindow(context: IssueWindowContext): void {
   loadRenderer(window);
 }
 
-// --- Dev / production isolation -------------------------------------------
+// --- Development / packaged build isolation -------------------------------
 // Give dev mode a separate app name and userData path so it gets its own
 // single-instance lock file and doesn't conflict with the packaged production
 // app. Must run BEFORE requestSingleInstanceLock() because the lock location
@@ -719,13 +724,18 @@ if (is.dev) {
   app.setName(DEV_APP_NAME);
   app.setPath("userData", join(app.getPath("appData"), DEV_APP_NAME));
 } else {
-  // Pin the production app name in code. Electron's Linux WM_CLASS is set
+  // Pin each packaged build name in code. Electron's Linux WM_CLASS is set
   // from app.getName() when the first BrowserWindow is realized; the
   // packaged ASAR's package.json `productName` already steers app.getName()
   // to "Multica", but anchoring it here makes WM_CLASS ↔ StartupWMClass
   // (declared in electron-builder.yml) survive a regression in
   // productName / the build pipeline. Must run before requestSingleInstanceLock().
-  app.setName("Multica");
+  app.setName(APP_NAME);
+  if (IS_LOCAL_BUILD) {
+    const userData = join(app.getPath("appData"), APP_NAME);
+    app.setPath("userData", userData);
+    app.setPath("sessionData", userData);
+  }
 }
 
 // --- Protocol registration -----------------------------------------------
@@ -791,6 +801,7 @@ if (!gotTheLock) {
 
     runtimeConfigResult = await loadRuntimeConfig({
       isDev: is.dev,
+      configPath: join(APP_HOME, "desktop.json"),
       // electron-vite exposes VITE_* on import.meta.env for the main process;
       // keep dev URL overrides on the same source the renderer used before
       // runtime config moved endpoint resolution into main/preload.
@@ -802,7 +813,7 @@ if (!gotTheLock) {
     });
 
     electronApp.setAppUserModelId(
-      is.dev ? "ai.multica.desktop.dev" : "ai.multica.desktop",
+      is.dev ? "ai.multica.desktop.dev" : APP_ID,
     );
 
     // macOS: replace the default Electron dock icon with the bundled logo
@@ -860,7 +871,7 @@ if (!gotTheLock) {
     ipcMain.on("app:get-info", (event) => {
       const p = process.platform;
       const os = p === "darwin" ? "macos" : p === "win32" ? "windows" : p === "linux" ? "linux" : "unknown";
-      event.returnValue = { version: getAppVersion(), os };
+      event.returnValue = { version: getAppVersion(), os, protocol: PROTOCOL };
     });
 
     // Sync IPC: read + clear any freeze/crash breadcrumb left by a previous
@@ -1083,6 +1094,7 @@ if (!gotTheLock) {
 
     // Register first so the update quit gate can block daemon autoStop.
     setupAutoUpdater(() => mainWindows.all(), {
+      disabled: IS_LOCAL_BUILD,
       // Windows only (the updater ignores it elsewhere): stop the bundled
       // daemon before the installer runs so multica.exe is replaced. #8823
       daemonGate: {
@@ -1099,6 +1111,10 @@ if (!gotTheLock) {
     setupDaemonManager(
       () => mainWindows.mostRecent(),
       () => mainWindows.all(),
+      {
+        profilePrefix: IS_LOCAL_BUILD ? "desktop-local" : "desktop",
+        preferencesPath: join(APP_HOME, "desktop_prefs.json"),
+      },
     );
     setupLocalDirectory(() => mainWindows.mostRecent());
     // QA built-in isolated browser: IPC, the view host and its heartbeat loop.

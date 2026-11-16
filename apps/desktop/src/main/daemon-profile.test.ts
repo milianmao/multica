@@ -36,6 +36,32 @@ describe("deriveProfileName", () => {
   });
 });
 
+describe("coexisting desktop builds", () => {
+  it("isolates profiles for the same backend by build prefix", () => {
+    const targetUrl = "https://api.multica.ai";
+    const regularProfile = deriveProfileName(targetUrl);
+    const localProfile = deriveProfileName(targetUrl, "desktop-local");
+
+    expect(profileDir(localProfile)).toBe(
+      join(MULTICA_DIR, "profiles", "desktop-local-api.multica.ai"),
+    );
+    expect(profileDir(localProfile)).not.toBe(profileDir(regularProfile));
+    for (const path of [
+      profileConfigPath,
+      profileLogPath,
+      profilePidPath,
+      profileUserIdPath,
+    ]) {
+      expect(path(localProfile)).not.toBe(path(regularProfile));
+    }
+    expect(profileArgs(localProfile)).toEqual(["--profile", localProfile]);
+    expect(profileArgs(localProfile)).not.toEqual(profileArgs(regularProfile));
+    expect(healthPortForProfile(localProfile)).not.toBe(
+      healthPortForProfile(regularProfile),
+    );
+  });
+});
+
 describe("profile paths", () => {
   it("always resolves under profiles/<name>", () => {
     const dir = join(MULTICA_DIR, "profiles", "desktop-api.multica.ai");

@@ -20,14 +20,20 @@ import { Button } from "@multica/ui/components/ui/button";
 import { useT } from "@multica/views/i18n";
 import { Loader2 } from "@multica/ui/icons";
 import { CliCallbackError } from "@/features/auth/cli-callback-error";
+import {
+  desktopAuthCallbackUrl,
+  desktopAuthProtocolFromState,
+} from "@/config/desktop-auth";
 import { callbackErrorFrom, type CallbackError } from "./callback-error";
 
 const authLogger = createLogger("auth.callback");
 
+/** Complete browser, CLI, or desktop OAuth without crossing desktop builds. */
 function CallbackContent() {
   const { t } = useT("auth");
   const router = useRouter();
   const searchParams = useSearchParams();
+  const desktopProtocol = desktopAuthProtocolFromState(searchParams.get("state") || "");
   const qc = useQueryClient();
   const loginWithGoogle = useAuthStore((s) => s.loginWithGoogle);
   const [error, setError] = useState<CallbackError | null>(null);
@@ -53,7 +59,6 @@ function CallbackContent() {
 
     const state = searchParams.get("state") || "";
     const stateParts = state.split(",");
-    const isDesktop = stateParts.includes("platform:desktop");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
     // Strip "next:" prefix, then drop anything that isn't a safe relative path
     // so an attacker-controlled `state=next:https://evil` cannot redirect here.
@@ -96,13 +101,13 @@ function CallbackContent() {
           authLogger.error("CLI Google OAuth callback failed", err);
           setError(callbackErrorFrom(err));
         });
-    } else if (isDesktop) {
+    } else if (desktopProtocol) {
       // Desktop flow: exchange code for token, then redirect via deep link
       api
         .googleLogin(code, redirectUri)
         .then(({ token }) => {
           setDesktopToken(token);
-          window.location.href = `multica://auth/callback?token=${encodeURIComponent(token)}`;
+          window.location.href = desktopAuthCallbackUrl(desktopProtocol, token);
         })
         .catch((err) => {
           authLogger.error("Desktop Google OAuth callback failed", err);
@@ -160,7 +165,7 @@ function CallbackContent() {
           setError(callbackErrorFrom(err));
         });
     }
-  }, [searchParams, loginWithGoogle, router, qc]);
+  }, [searchParams, loginWithGoogle, router, qc, desktopProtocol]);
 
   const errorDescription = (() => {
     if (!error) return null;
@@ -188,7 +193,7 @@ function CallbackContent() {
     }
   })();
 
-  if (desktopToken) {
+  if (desktopToken && desktopProtocol) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <Card className="w-full max-w-sm">
@@ -204,7 +209,7 @@ function CallbackContent() {
             <Button
               variant="outline"
               onClick={() => {
-                window.location.href = `multica://auth/callback?token=${encodeURIComponent(desktopToken)}`;
+                window.location.href = desktopAuthCallbackUrl(desktopProtocol, desktopToken);
               }}
             >
               {t(($) => $.web.desktop_handoff.open_button)}
