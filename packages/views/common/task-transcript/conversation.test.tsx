@@ -55,6 +55,8 @@ vi.mock("@multica/ui/components/ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) => open ? <>{children}</> : null,
   DialogContent: ({ children }: { children: ReactNode }) => <div role="dialog">{children}</div>,
   DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
+  // alert-dialog imports it from this module, so the mock must re-export it.
+  SafeAreaLayer: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 
 const task: AgentTask = {
