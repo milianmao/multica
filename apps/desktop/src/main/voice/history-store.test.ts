@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { existsSync } from "fs";
-import { mkdtemp, readdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, readdir, rm, stat, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
@@ -133,6 +133,14 @@ describe("VoiceHistoryStore", () => {
     expect(list.at(-1)?.id).toBe(`e${MAX_HISTORY_ENTRIES - 2}`);
     expect(existsSync(join(root, `e${MAX_HISTORY_ENTRIES - 1}.webm`))).toBe(false);
     expect((await open()).list()).toHaveLength(MAX_HISTORY_ENTRIES);
+  });
+
+  it("creates the history folder readable only by the current user", async () => {
+    // Recordings and transcripts are private; umask must not decide this.
+    await open();
+    if (process.platform === "win32") return; // no POSIX mode bits to assert
+    const mode = (await stat(root)).mode & 0o777;
+    expect(mode.toString(8)).toBe("700");
   });
 
   it("ignores a corrupt index and entries that point outside the folder", async () => {

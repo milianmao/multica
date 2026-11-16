@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import type {
   VoiceHistoryAudio,
@@ -82,7 +82,11 @@ export class VoiceHistoryStore {
   }
 
   async init(): Promise<void> {
-    await mkdir(this.options.root, { recursive: true });
+    // Recordings and their transcripts are private to the signed-in user, so the
+    // folder is created owner-only; `mode` is ignored where the directory
+    // already exists, so the chmod makes the tightening apply to upgrades too.
+    await mkdir(this.options.root, { recursive: true, mode: 0o700 });
+    await chmod(this.options.root, 0o700).catch(() => {});
     try {
       const raw: unknown = JSON.parse(await readFile(join(this.options.root, INDEX), "utf8"));
       this.entries = Array.isArray(raw) ? raw.filter(isStoredEntry) : [];

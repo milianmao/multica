@@ -7,10 +7,10 @@ import {
   nativeImage,
   Notification,
   screen,
+  session,
 } from "electron";
 import { homedir } from "os";
 import { join } from "path";
-import { pathToFileURL } from "url";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import fixPath from "fix-path";
 import { createElectronBusyInstallPrompt, setupAutoUpdater } from "./updater";
@@ -30,6 +30,8 @@ import { devToolbarPreferencesPath, installDevToolbarToggle } from "./dev-toolba
 import { handleAppShortcut } from "./keyboard-shortcuts";
 import { installNavigationGestures } from "./navigation-gestures";
 import { installNavigationGuard } from "./navigation-guard";
+import { rendererDocumentURL, rendererEntryPath } from "./renderer-location";
+import { installRendererPermissionPolicy } from "./renderer-permissions";
 import { installWindowForegroundEvents, windowForeground } from "./window-foreground";
 import { createRendererWebPreferences } from "./renderer-web-preferences";
 import { getAppVersion } from "./app-version";
@@ -371,11 +373,8 @@ function getSystemLocale(): string {
 
 function loadRenderer(window: BrowserWindow): void {
   installWindowForegroundEvents(window);
-  const rendererEntry = join(__dirname, "../renderer/index.html");
-  const rendererURL =
-    is.dev && process.env["ELECTRON_RENDERER_URL"]
-      ? process.env["ELECTRON_RENDERER_URL"]
-      : pathToFileURL(rendererEntry).toString();
+  const rendererEntry = rendererEntryPath();
+  const rendererURL = rendererDocumentURL();
 
   // Installed before the load so the very first navigation is already covered.
   // Both the main window and every issue window load through here, so guarding
@@ -828,6 +827,12 @@ if (!gotTheLock) {
       const icon = nativeImage.createFromPath(BUNDLED_ICON_PATH);
       if (!icon.isEmpty()) app.dock.setIcon(icon);
     }
+
+    // Before any window exists: Electron grants every permission when no
+    // handler is registered, so a late install leaves the first loads unpoliced.
+    // The QA browser runs in its own per-task partition and keeps its
+    // deny-everything hooks (qa-browser-host.ts).
+    installRendererPermissionPolicy(session.defaultSession, rendererDocumentURL());
 
     app.on("browser-window-created", (_, window) => {
       optimizer.watchWindowShortcuts(window);

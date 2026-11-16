@@ -27,8 +27,10 @@ import {
 import { findVoiceModel } from "./catalog";
 import { VoiceEngine } from "./engine";
 import { MAX_HISTORY_AUDIO_BYTES, VoiceHistoryStore } from "./history-store";
+import { isTrustedVoiceSender } from "./ipc-guard";
 import { ModelStore } from "./model-store";
 import { hotwordList, type LoadSpec } from "./worker-protocol";
+import { rendererDocumentURL } from "../renderer-location";
 import workerPath from "./worker?modulePath";
 
 const HISTORY_STATUSES = new Set<VoiceHistoryStatus>(["transcribing", "done", "failed", "interrupted"]);
@@ -88,31 +90,42 @@ export function setupVoiceInput(): void {
     };
   };
   const modelIdOf = (request: unknown) => (request as { modelId: string }).modelId;
+  // Every voice channel reads the microphone path or the on-device recording
+  // history, so each one refuses a sender that is not Multica's own renderer.
+  const trustedURL = rendererDocumentURL();
+  const trusted = (event: { senderFrame?: { url?: string } | null }) =>
+    isTrustedVoiceSender(event, trustedURL);
 
-  ipcMain.handle(VOICE_MODELS_LIST_CHANNEL, async () => {
+  ipcMain.handle(VOICE_MODELS_LIST_CHANNEL, async (event) => {
+    if (!trusted(event)) return null;
     await ready;
     return snapshot();
   });
-  ipcMain.handle(VOICE_MODEL_DOWNLOAD_CHANNEL, async (_event, id: unknown) => {
+  ipcMain.handle(VOICE_MODEL_DOWNLOAD_CHANNEL, async (event, id: unknown) => {
+    if (!trusted(event)) return;
     await ready;
     if (typeof id === "string") void store.download(id);
   });
-  ipcMain.handle(VOICE_MODEL_CANCEL_CHANNEL, (_event, id: unknown) => {
+  ipcMain.handle(VOICE_MODEL_CANCEL_CHANNEL, (event, id: unknown) => {
+    if (!trusted(event)) return;
     if (typeof id === "string") store.cancel(id);
   });
-  ipcMain.handle(VOICE_MODEL_DELETE_CHANNEL, async (_event, id: unknown) => {
+  ipcMain.handle(VOICE_MODEL_DELETE_CHANNEL, async (event, id: unknown) => {
+    if (!trusted(event)) return;
     if (typeof id !== "string" || !findVoiceModel(id)) return;
     await ready;
     engine.stop();
     await store.remove(id);
   });
-  ipcMain.on(VOICE_PREPARE_CHANNEL, (_event, request: unknown) => {
+  ipcMain.on(VOICE_PREPARE_CHANNEL, (event, request: unknown) => {
+    if (!trusted(event)) return;
     void ready.then(() => {
       const spec = loadSpec(request);
       if (spec && engine.available() && store.isReady(modelIdOf(request))) engine.prepare(spec);
     });
   });
-  ipcMain.handle(VOICE_TRANSCRIBE_CHANNEL, async (_event, request: unknown): Promise<VoiceTranscribeResult> => {
+  ipcMain.handle(VOICE_TRANSCRIBE_CHANNEL, async (event, request: unknown): Promise<VoiceTranscribeResult> => {
+    if (!trusted(event)) return { ok: false, reason: "failed", error: "invalid request" };
     await ready;
     const spec = loadSpec(request);
     const samples = (request as { samples?: unknown } | null)?.samples;
@@ -128,37 +141,44 @@ export function setupVoiceInput(): void {
     }
   });
 
-  ipcMain.handle(VOICE_HISTORY_LIST_CHANNEL, async (): Promise<VoiceHistoryEntry[]> => {
+  ipcMain.handle(VOICE_HISTORY_LIST_CHANNEL, async (event): Promise<VoiceHistoryEntry[]> => {
+    if (!trusted(event)) return [];
     await historyReady;
     await history.expire();
     return history.list();
   });
-  ipcMain.handle(VOICE_HISTORY_SAVE_CHANNEL, async (_event, request: unknown): Promise<VoiceHistoryEntry | null> => {
+  ipcMain.handle(VOICE_HISTORY_SAVE_CHANNEL, async (event, request: unknown): Promise<VoiceHistoryEntry | null> => {
+    if (!trusted(event)) return null;
     await historyReady;
     const { audio, mimeType, durationMs, keepDays } = (request ?? {}) as Record<string, unknown>;
     if (!(audio instanceof Uint8Array) || audio.byteLength === 0 || audio.byteLength > MAX_HISTORY_AUDIO_BYTES) return null;
     if (typeof mimeType !== "string" || typeof durationMs !== "number" || !Number.isFinite(durationMs)) return null;
     return history.save(audio, mimeType.slice(0, 100), Math.max(0, durationMs), keepDaysOf(keepDays));
   });
-  ipcMain.handle(VOICE_HISTORY_UPDATE_CHANNEL, async (_event, id: unknown, patch: unknown) => {
+  ipcMain.handle(VOICE_HISTORY_UPDATE_CHANNEL, async (event, id: unknown, patch: unknown) => {
+    if (!trusted(event)) return;
     await historyReady;
     const { status, text } = (patch ?? {}) as Record<string, unknown>;
     if (typeof id !== "string" || !HISTORY_STATUSES.has(status as VoiceHistoryStatus)) return;
     await history.update(id, { status: status as VoiceHistoryStatus, text: typeof text === "string" ? text : undefined });
   });
-  ipcMain.handle(VOICE_HISTORY_AUDIO_CHANNEL, async (_event, id: unknown): Promise<VoiceHistoryAudio | null> => {
+  ipcMain.handle(VOICE_HISTORY_AUDIO_CHANNEL, async (event, id: unknown): Promise<VoiceHistoryAudio | null> => {
+    if (!trusted(event)) return null;
     await historyReady;
     return typeof id === "string" ? history.audio(id) : null;
   });
-  ipcMain.handle(VOICE_HISTORY_REMOVE_CHANNEL, async (_event, id: unknown) => {
+  ipcMain.handle(VOICE_HISTORY_REMOVE_CHANNEL, async (event, id: unknown) => {
+    if (!trusted(event)) return;
     await historyReady;
     if (typeof id === "string") await history.remove(id);
   });
-  ipcMain.handle(VOICE_HISTORY_RETENTION_CHANNEL, async (_event, keepDays: unknown) => {
+  ipcMain.handle(VOICE_HISTORY_RETENTION_CHANNEL, async (event, keepDays: unknown) => {
+    if (!trusted(event)) return;
     await historyReady;
     if (keepDays === null || typeof keepDays === "number") await history.setRetention(keepDaysOf(keepDays));
   });
-  ipcMain.handle(VOICE_HISTORY_CLEAR_CHANNEL, async () => {
+  ipcMain.handle(VOICE_HISTORY_CLEAR_CHANNEL, async (event) => {
+    if (!trusted(event)) return;
     await historyReady;
     await history.clear();
   });
