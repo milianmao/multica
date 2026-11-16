@@ -60,6 +60,15 @@ describe("installRendererPermissionPolicy", () => {
     expect(check({}, "media", "file://", { mediaType: "video", requestingUrl: RENDERER })).toBe(false);
   });
 
+  it("keeps clipboard writes working, since Electron routes writeText through clipboard-read", () => {
+    // Verified against Electron 44: a media-only policy makes every Copy button
+    // fail, and granting this re-enables writeText. Nothing else is widened.
+    const { request, check } = install();
+
+    expect(requested(request, "clipboard-read", { requestingUrl: RENDERER })).toBe(true);
+    expect(check({}, "clipboard-read", RENDERER, { requestingUrl: RENDERER })).toBe(true);
+  });
+
   it("denies the same audio request from a foreign document", () => {
     const { request, check } = install();
 
