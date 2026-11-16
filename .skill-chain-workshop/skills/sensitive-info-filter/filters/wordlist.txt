@@ -1,0 +1,29 @@
+# Sensitive Info Filter — 业务敏感词库 (v1.1)
+# 每行一个敏感词，# 开头为注释
+# 建议分类组织，便于维护
+
+# ── 测试/演示场景可移除 ──
+测试密钥
+fake_password
+dummy_token
+
+# ── 占位符关键字（这些通常可保留，但作为兜底匹配）──
+your_key_here
+your_token_here
+your_password_here
+changeme
+todo_replace
+
+# ── 客户名（按需扩展）──
+# 客户A
+# 客户B
+# ACME-Corp
+
+# ── 内部项目代号（按需扩展）──
+# Project-Phoenix
+# Operation-Omega
+# 内部代号-2026
+
+# ── 员工信息 ──
+# 工号
+# 员工ID

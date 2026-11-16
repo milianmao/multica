@@ -37,6 +37,8 @@ import type {
 } from "../shared/workspace-window";
 
 interface DesktopAPI {
+  /** Build-owned deep-link scheme; Local must not hand login tokens to production. */
+  appProtocol: "multica" | "multica-local";
   /** App version + normalized OS, captured synchronously at preload time. */
   appInfo: {
     version: string;

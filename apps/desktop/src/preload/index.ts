@@ -79,16 +79,18 @@ import {
   type WorkspacePathRequest,
 } from "../shared/workspace-window";
 
-// Synchronously fetch app metadata from main at preload time so the renderer
-// can pass it into CoreProvider during the initial render — the alternative
-// (async ipc.invoke) would race the ApiClient construction in initCore and
-// the first few HTTP requests would go out without X-Client-Version/OS.
-function fetchAppInfo(): { version: string; os: "macos" | "windows" | "linux" | "unknown" } {
+/**
+ * Captures metadata before CoreProvider's first request, including the build's
+ * allowlisted protocol so browser login returns to the correct installation.
+ */
+function fetchAppInfo(): { version: string; os: "macos" | "windows" | "linux" | "unknown"; protocol: "multica" | "multica-local" } {
   try {
     const info = ipcRenderer.sendSync("app:get-info") as
-      | { version: string; os: "macos" | "windows" | "linux" | "unknown" }
+      | { version: string; os: "macos" | "windows" | "linux" | "unknown"; protocol?: string }
       | undefined;
-    if (info && typeof info.version === "string" && typeof info.os === "string") return info;
+    if (info && typeof info.version === "string" && typeof info.os === "string") {
+      return { ...info, protocol: info.protocol === "multica-local" ? "multica-local" : "multica" };
+    }
   } catch {
     // fall through
   }
@@ -96,7 +98,7 @@ function fetchAppInfo(): { version: string; os: "macos" | "windows" | "linux" | 
   const p = process.platform;
   const os: "macos" | "windows" | "linux" | "unknown" =
     p === "darwin" ? "macos" : p === "win32" ? "windows" : p === "linux" ? "linux" : "unknown";
-  return { version: "unknown", os };
+  return { version: "unknown", os, protocol: "multica" };
 }
 
 function fetchRuntimeConfig(): RuntimeConfigResult {
@@ -151,6 +153,7 @@ const desktopAPI = {
   /** App version + normalized OS. Read once at preload time so the renderer
    *  can use it synchronously when initializing the API client. */
   appInfo,
+  appProtocol: appInfo.protocol,
   /** OS-preferred locale (BCP 47), passed from main via additionalArguments.
    *  Used by the renderer's LocaleAdapter as the system-preference signal. */
   systemLocale,
