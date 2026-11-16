@@ -22,6 +22,7 @@ import {
 import { setupLocalDirectory } from "./local-directory";
 import { closeQaBrowserWindow, setupQaBrowser } from "./qa-browser-setup";
 import { setupThemeFolder } from "./theme-folder";
+import { setupVoiceInput } from "./voice";
 import { configureLinuxFileDialogs } from "./linux-file-dialog";
 import { openExternalSafely, downloadURLSafely } from "./external-url";
 import { installContextMenu } from "./context-menu";
@@ -45,6 +46,7 @@ import {
   type RendererRecoveryWindow,
 } from "./renderer-recovery";
 import { createBestEffortDevLog } from "./dev-log";
+import { ignoreBrokenStdio } from "./stdio-guard";
 import { appendMissingPathDirs } from "./path-fallback";
 import {
   writeFreezeBreadcrumb,
@@ -153,6 +155,9 @@ if (process.platform !== "win32") {
     join(homedir(), ".local/bin"),
   ]);
 }
+
+// Before anything can log: release builds write to stdout/stderr too.
+ignoreBrokenStdio();
 
 // Packaged metadata identifies Local before any sessions or instance locks exist.
 const IS_LOCAL_BUILD = !is.dev && app.getName() === "Multica Local";
@@ -1122,6 +1127,7 @@ if (!gotTheLock) {
     // off leaves no reachable view surface behind.
     const qaBrowser = setupQaBrowser();
     setupThemeFolder();
+    setupVoiceInput();
 
     // Registered after the updater and daemon gates, so a quit they hold
     // (busy daemon, pending install) leaves the session writable; only the
