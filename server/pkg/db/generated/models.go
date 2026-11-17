@@ -646,6 +646,7 @@ type ChatSession struct {
 	PinnedAt            pgtype.Timestamptz `json:"pinned_at"`
 	ProjectID           pgtype.UUID        `json:"project_id"`
 	ExplicitlyCreatedAt pgtype.Timestamptz `json:"explicitly_created_at"`
+	ExecutionConfig     []byte             `json:"execution_config"`
 }
 
 type ChatSubmissionReceipt struct {
@@ -915,6 +916,8 @@ type InboxItem struct {
 	ActorID       pgtype.UUID        `json:"actor_id"`
 	Details       []byte             `json:"details"`
 	Section       pgtype.Text        `json:"section"`
+	SnoozedUntil  pgtype.Timestamptz `json:"snoozed_until"`
+	SnoozedAt     pgtype.Timestamptz `json:"snoozed_at"`
 }
 
 type InstanceTelemetryState struct {
@@ -1521,23 +1524,26 @@ type PluginStorage struct {
 }
 
 type Project struct {
-	ID          pgtype.UUID        `json:"id"`
-	WorkspaceID pgtype.UUID        `json:"workspace_id"`
-	Title       string             `json:"title"`
-	Description pgtype.Text        `json:"description"`
-	Icon        pgtype.Text        `json:"icon"`
-	Status      string             `json:"status"`
-	LeadType    pgtype.Text        `json:"lead_type"`
-	LeadID      pgtype.UUID        `json:"lead_id"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-	Priority    string             `json:"priority"`
-	StartDate   pgtype.Date        `json:"start_date"`
-	DueDate     pgtype.Date        `json:"due_date"`
-	WorkflowID  pgtype.UUID        `json:"workflow_id"`
-	CreatorType pgtype.Text        `json:"creator_type"`
-	CreatorID   pgtype.UUID        `json:"creator_id"`
-	Visibility  string             `json:"visibility"`
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	Title          string             `json:"title"`
+	Description    pgtype.Text        `json:"description"`
+	Icon           pgtype.Text        `json:"icon"`
+	Status         string             `json:"status"`
+	LeadType       pgtype.Text        `json:"lead_type"`
+	LeadID         pgtype.UUID        `json:"lead_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	Priority       string             `json:"priority"`
+	StartDate      pgtype.Date        `json:"start_date"`
+	DueDate        pgtype.Date        `json:"due_date"`
+	WorkflowID     pgtype.UUID        `json:"workflow_id"`
+	CreatorType    pgtype.Text        `json:"creator_type"`
+	CreatorID      pgtype.UUID        `json:"creator_id"`
+	Visibility     string             `json:"visibility"`
+	ArchivedAt     pgtype.Timestamptz `json:"archived_at"`
+	ArchivedByType pgtype.Text        `json:"archived_by_type"`
+	ArchivedByID   pgtype.UUID        `json:"archived_by_id"`
 }
 
 type ProjectMember struct {
@@ -1731,6 +1737,27 @@ type SysCronExecution struct {
 	ErrorMsg     pgtype.Text        `json:"error_msg"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type TaskApproval struct {
+	ID              pgtype.UUID        `json:"id"`
+	TaskID          pgtype.UUID        `json:"task_id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	IssueID         pgtype.UUID        `json:"issue_id"`
+	RuntimeID       pgtype.UUID        `json:"runtime_id"`
+	DispatchedAt    pgtype.Timestamptz `json:"dispatched_at"`
+	ExecutionID     pgtype.UUID        `json:"execution_id"`
+	NativeRequestID string             `json:"native_request_id"`
+	Kind            string             `json:"kind"`
+	Method          string             `json:"method"`
+	Params          []byte             `json:"params"`
+	Status          string             `json:"status"`
+	Decision        pgtype.Text        `json:"decision"`
+	DecidedBy       pgtype.UUID        `json:"decided_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	DecidedAt       pgtype.Timestamptz `json:"decided_at"`
+	ProcessedAt     pgtype.Timestamptz `json:"processed_at"`
+	ExpiredAt       pgtype.Timestamptz `json:"expired_at"`
 }
 
 type TaskContextReceipt struct {

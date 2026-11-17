@@ -117,7 +117,8 @@ export function ThinkingSettingField({
   );
 }
 
-function pickModelEntry(
+/** Resolve only defaults whose provider actually advertises the active model identity. */
+export function pickModelEntry(
   models: RuntimeModel[],
   model: string,
   provider: string,

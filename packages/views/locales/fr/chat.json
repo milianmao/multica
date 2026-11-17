@@ -25,6 +25,25 @@
     "more_one": "{{count}} autre discussion",
     "more_other": "{{count}} autres discussions"
   },
+  "execution_config": {
+    "label": "Paramètres d’exécution",
+    "inherit": "Utiliser les paramètres de l’agent",
+    "model": "Modèle",
+    "thinking": "Effort de raisonnement",
+    "approval": "Permissions",
+    "approval_inherit": "Conserver le comportement actuel",
+    "approval_on_request": "Demander si nécessaire",
+    "approval_full_access": "Accès complet",
+    "unsupported": "Ce serveur ne prend pas en charge la personnalisation des paramètres d’exécution du chat.",
+    "model_unsupported": "Cet environnement d’exécution ne permet pas de changer de modèle.",
+    "thinking_unsupported": "Cet environnement d’exécution ne permet pas de modifier l’effort de raisonnement.",
+    "thinking_unavailable": "Le modèle actuel ne propose aucun niveau d’effort de raisonnement sélectionnable.",
+    "catalog_unavailable": "Le catalogue de modèles de l’environnement d’exécution est indisponible.",
+    "refresh_catalog": "Actualiser les modèles",
+    "approval_unsupported": "Les approbations natives sont actuellement disponibles uniquement pour Codex.",
+    "full_access_hint": "L’accès complet supprime les limites du bac à sable. Il permet d’exécuter des commandes et de modifier des fichiers sans demander.",
+    "save_failed": "Impossible d’enregistrer ces paramètres. La sélection précédente a été conservée."
+  },
   "input": {
     "page_context_add": "Ajouter cette page comme contexte",
     "page_context_remove": "Retirer le contexte de la page",

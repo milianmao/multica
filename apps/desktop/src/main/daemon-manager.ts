@@ -14,7 +14,7 @@ import {
   unwatchFile,
   type StatsListener,
 } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { homedir, hostname } from "os";
 import type {
   DaemonStatus,
@@ -62,7 +62,7 @@ import { daemonSpawnEnv } from "./daemon-spawn-env";
 import { focusEnvironmentAt, type FocusEnvironmentResult } from "./environment-focus";
 
 const POLL_INTERVAL_MS = 5_000;
-const PREFS_PATH = join(homedir(), ".multica", "desktop_prefs.json");
+const DEFAULT_PREFS_PATH = join(homedir(), ".multica", "desktop_prefs.json");
 const LOG_TAIL_RETRY_MS = 2_000;
 const LOG_TAIL_MAX_RETRIES = 5;
 // How long a start may sit in "starting" (with no /health) before we probe the
@@ -105,6 +105,8 @@ let cachedCliBinaryVersion: string | null | undefined = undefined;
 // fires the restart once active_task_count drops to 0.
 let pendingVersionRestart = false;
 let targetApiBaseUrl: string | null = null;
+let profilePrefix = "desktop";
+let preferencesPath = DEFAULT_PREFS_PATH;
 let activeProfile: ActiveProfile | null = null;
 // Recovery is intentionally process-local: it keeps a daemon alive while the
 // Desktop main process is running, but is not an OS service/watchdog.
@@ -322,7 +324,7 @@ async function writeProfileConfig(
 }
 
 /**
- * Returns the Desktop-owned profile for the current target API URL. Creates
+ * Returns the build-owned profile for the current target API URL. Creates
  * the profile's config.json on demand with `server_url` pinned to the target.
  *
  * Returns `null` until the renderer reports its `apiUrl`. There is no profile
@@ -334,7 +336,7 @@ async function resolveActiveProfile(): Promise<ActiveProfile | null> {
   const target = targetApiBaseUrl;
   if (!target) return null;
 
-  const name = deriveProfileName(target);
+  const name = deriveProfileName(target, profilePrefix);
   const cfg = await readProfileConfig(name);
 
   if (cfg.server_url !== target) {
@@ -834,9 +836,10 @@ async function restartDaemonAfterUserSwitch(
   }
 }
 
+/** Reads build-owned daemon choices while retaining the existing defaults. */
 async function loadPrefs(): Promise<DaemonPrefs> {
   try {
-    const raw = await readFile(PREFS_PATH, "utf-8");
+    const raw = await readFile(preferencesPath, "utf-8");
     const parsed = JSON.parse(raw);
     return { ...DEFAULT_PREFS, ...parsed };
   } catch {
@@ -844,10 +847,10 @@ async function loadPrefs(): Promise<DaemonPrefs> {
   }
 }
 
+/** Creates only the selected preferences directory, keeping coexisting builds separate. */
 async function savePrefs(prefs: DaemonPrefs): Promise<void> {
-  const dir = join(homedir(), ".multica");
-  await mkdir(dir, { recursive: true });
-  await writeFile(PREFS_PATH, JSON.stringify(prefs, null, 2), "utf-8");
+  await mkdir(dirname(preferencesPath), { recursive: true });
+  await writeFile(preferencesPath, JSON.stringify(prefs, null, 2), "utf-8");
 }
 
 async function clearToken(): Promise<void> {
@@ -1004,7 +1007,10 @@ async function probeLocalRuntimes(): Promise<LocalRuntimeProbe> {
 // applied by fix-path in main/index.ts — as a top-level const it would
 // snapshot process.env at import time, before that block runs.
 function desktopSpawnEnv(): NodeJS.ProcessEnv {
-  return daemonSpawnEnv(process.env);
+  return daemonSpawnEnv(
+    process.env,
+    profilePrefix === "desktop-local" ? targetApiBaseUrl : undefined,
+  );
 }
 
 function scheduleStatusRefresh(): void {
@@ -1476,6 +1482,7 @@ export function resumeDaemonAfterAbortedUpdateInstall(): void {
 /**
  * `windowGetter` is the main window that hosts dialogs and progress;
  * `statusWindowsGetter` lists every main window that shows daemon status.
+ * Capture build-specific ownership before registering any daemon IPC handlers.
  */
 export function setupDaemonManager(
   windowGetter: () => BrowserWindow | null,
@@ -1483,9 +1490,12 @@ export function setupDaemonManager(
     const window = windowGetter();
     return window ? [window] : [];
   },
+  options: { profilePrefix?: string; preferencesPath?: string } = {},
 ): void {
   getMainWindow = windowGetter;
   getStatusWindows = statusWindowsGetter;
+  profilePrefix = options.profilePrefix ?? "desktop";
+  preferencesPath = options.preferencesPath ?? DEFAULT_PREFS_PATH;
 
   ipcMain.handle("daemon:set-target-api-url", async (_e, url: string) => {
     const normalized = url || null;

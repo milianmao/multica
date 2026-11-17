@@ -103,9 +103,12 @@ var patterns = []secretPattern{
 	// Connection strings with embedded passwords
 	{regexp.MustCompile(`(?i)(?:postgres|mysql|mongodb|redis|amqp)(?:ql)?://[^:\s]+:[^@\s]+@`), "[REDACTED CONNECTION STRING]@"},
 
-	// Generic key=value patterns for common secret env var names
-	{regexp.MustCompile(`(?i)(?:API_KEY|API_SECRET|SECRET_KEY|SECRET|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|DATABASE_URL|DB_PASSWORD|DB_URL|REDIS_URL|PASSWORD|TOKEN)\s*[=:]\s*\S+`), "[REDACTED CREDENTIAL]"},
+	// Quoted values can contain spaces or escaped quotes; preserve non-secret review context.
+	{regexp.MustCompile(`(?i)["']?(?:API[_-]?KEY|API[_-]?SECRET|SECRET[_-]?KEY|SECRET|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|PRIVATE[_-]?KEY|DATABASE[_-]?URL|DB[_-]?PASSWORD|DB[_-]?URL|REDIS[_-]?URL|PASSWORD|TOKEN)["']?\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+)`), "[REDACTED CREDENTIAL]"},
 }
+
+// credentialFieldPattern recognizes structured secrets whose values have no vendor-specific prefix.
+var credentialFieldPattern = regexp.MustCompile(`(?i)(?:^|[_-])(?:api[_-]?key|api[_-]?secret|secret[_-]?key|secret|access[_-]?token|auth[_-]?token|private[_-]?key|database[_-]?url|db[_-]?password|db[_-]?url|redis[_-]?url|password|token|authorization|cookie)$`)
 
 // maxRedactDepth bounds the walk in redactValue. Tool inputs are decoded from
 // daemon-supplied JSON, so nesting depth is attacker-influenced; without a
@@ -131,6 +134,7 @@ func InputMap(m map[string]any) map[string]any {
 	return redactMap(m, 0)
 }
 
+// redactMap masks credential fields before recursively copying their non-secret siblings.
 func redactMap(m map[string]any, depth int) map[string]any {
 	if m == nil {
 		return nil
@@ -140,6 +144,10 @@ func redactMap(m map[string]any, depth int) map[string]any {
 	}
 	out := make(map[string]any, len(m))
 	for k, v := range m {
+		if _, text := v.(string); text && credentialFieldPattern.MatchString(k) {
+			out[k] = "[REDACTED CREDENTIAL]"
+			continue
+		}
 		out[k] = redactValue(v, depth+1)
 	}
 	return out
@@ -177,7 +185,11 @@ func redactValue(v any, depth int) any {
 	case map[string]string:
 		out := make(map[string]string, len(t))
 		for k, e := range t {
-			out[k] = Text(e)
+			if credentialFieldPattern.MatchString(k) {
+				out[k] = "[REDACTED CREDENTIAL]"
+			} else {
+				out[k] = Text(e)
+			}
 		}
 		return out
 	default:

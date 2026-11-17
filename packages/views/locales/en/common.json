@@ -135,5 +135,37 @@
   },
   "navigation": {
     "open_in_new_tab": "Open in new tab"
+  },
+  "task_approvals": {
+    "title": "Native approvals",
+    "kind": {
+      "command": "Command",
+      "file_change": "File changes",
+      "permissions": "Permissions",
+      "unsupported": "Unsupported request"
+    },
+    "status": {
+      "pending": "Waiting for human approval",
+      "decided": "Decided · waiting for execution to continue",
+      "processed": "Processed",
+      "expired": "Expired"
+    },
+    "decision": {
+      "approve": "Approved once",
+      "deny": "Denied"
+    },
+    "approve": "Approve once",
+    "deny": "Deny",
+    "submitting": "Submitting decision…",
+    "read_only": "Only authorized people can decide.",
+    "command": "Command",
+    "cwd": "Working directory",
+    "changes": "File changes",
+    "permissions": "Permission scope",
+    "details": "Request details",
+    "load_failed": "Could not load approvals.",
+    "decision_failed": "Could not submit the decision.",
+    "unavailable": "Native approvals are unavailable for this task.",
+    "retry": "Retry"
   }
 }

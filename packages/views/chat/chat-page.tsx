@@ -24,6 +24,7 @@ import { useNavigation } from "../navigation";
 import { useT } from "../i18n";
 import { ChatMessageList, ChatMessageSkeleton } from "./components/chat-message-list";
 import { ChatInput } from "./components/chat-input";
+import { ChatExecutionControls } from "./components/chat-execution-controls";
 import { ChatQueue } from "./components/chat-queue";
 import { ChatThreadList } from "./components/chat-thread-list";
 import { ChatSessionHeader } from "./components/chat-session-header";
@@ -331,6 +332,8 @@ export function ChatPage() {
       ) : c.hasMessages ? (
         <ChatMessageList
           key={c.activeSessionId}
+          wsId={c.wsId}
+          showTaskApprovals={c.currentSession?.execution_config_supported === true}
           messages={c.messages}
           pendingTask={c.pendingTask}
           availability={c.availability}
@@ -396,6 +399,7 @@ export function ChatPage() {
       />
 
       <ChatInput
+        leftAdornment={<ChatExecutionControls controller={c} />}
         onSend={c.handleSend}
         restoreDraftRequest={c.restoreDraftRequest}
         conversationStarterRequest={c.conversationStarterRequest}

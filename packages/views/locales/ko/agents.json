@@ -727,6 +727,15 @@
     "failed_indicator": "실패"
   },
   "transcript": {
+    "conversation": "대화",
+    "execution_log": "실행 로그",
+    "final_reply": "최종 답변",
+    "guidance_label": "이 실행에 지침 추가",
+    "guidance_send": "지침 보내기",
+    "guidance_failed": "지침을 보내지 못했습니다. 입력한 내용은 유지됩니다.",
+    "guidance_shared": "태스크의 댓글 스레드에 표시됩니다.",
+    "guidance_unavailable": "이 실행에는 지침을 추가할 수 없습니다.",
+    "guidance_ended": "이 실행이 종료되었습니다.",
     "dialog_title": "에이전트 실행 트랜스크립트",
     "status_running": "실행 중",
     "status_completed": "완료됨",

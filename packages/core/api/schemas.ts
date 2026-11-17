@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { normalizeIssueStatusCategory } from "../issues/config/status";
 import type {
+  BatchIssueOutcome,
+  BatchIssueResult,
+  BatchUpdateIssuesResponse,
   AppCatalogResponse,
   AppsOverview,
   TeamAppImpact,
@@ -61,6 +64,7 @@ import type {
   IssueEnvironmentsResponse,
   IssuePullRequestSummariesResponse,
   InboxItem,
+  SnoozedInboxIssue,
   InboxWorkspaceUnread,
   IssueUnread,
   Label,
@@ -867,6 +871,8 @@ export const SidebarProjectPrefsDocSchema = z.object({
     statuses: z.array(z.string()).optional().catch(undefined),
     onlyMine: z.boolean().optional().catch(undefined),
     showCount: z.boolean().optional().catch(undefined),
+    showNoProject: z.boolean().optional().catch(undefined),
+    minimalIcons: z.boolean().optional().catch(undefined),
   }).catch({}),
   issues: z.object({
     sortBy: z.enum(["updated_at", "created_at", "priority", "status", "title", "due_date"]).optional().catch(undefined),
@@ -1806,11 +1812,19 @@ export const ProjectSchema = z.object({
   due_date: z.string().nullable().default(null),
   created_at: z.string(),
   updated_at: z.string(),
+  last_activity_at: z.string().optional().catch(undefined),
   issue_count: z.number().default(0),
   done_count: z.number().default(0),
   resource_count: z.number().default(0),
   workflow_id: z.string().nullable().default(null),
+  archived_at: z.string().nullable().default(null).catch(null),
+  archived_by_type: z.enum(["member", "agent"]).nullable().default(null).catch(null),
+  archived_by_id: z.string().nullable().default(null).catch(null),
 }).loose();
+
+export const ArchiveProjectResponseSchema = ProjectSchema.extend({
+  paused_autopilot_ids: z.array(z.string()).default([]).catch([]),
+});
 
 export const EMPTY_PROJECT: Project = {
   id: "", workspace_id: "", title: "", description: null, icon: null,
@@ -1837,6 +1851,33 @@ export const ProjectMemberSchema = z.object({
 export const ListProjectMembersResponseSchema = z.object({
   members: z.array(ProjectMemberSchema),
   total: z.number(),
+  // Absent from a server that predates it; see canManageProjectAccess.
+  manager_id: z.string().nullable().default(null).catch(null),
+}).loose();
+
+// The workspace owner's overview of private projects (`/api/projects/private`).
+// A row whose id is missing is dropped rather than failing the whole list: the
+// overview is how an owner gets back into a project nobody else can open.
+const PrivateProjectOverviewSchema = z.object({
+  id: z.string(),
+  title: z.string().catch(""),
+  icon: z.string().nullable().default(null).catch(null),
+  lead_type: z.enum(["member", "agent"]).nullable().default(null).catch(null),
+  lead_id: z.string().nullable().default(null).catch(null),
+  created_at: z.string().catch(""),
+  archived_at: z.string().nullable().default(null).catch(null),
+  is_member: z.boolean().catch(false),
+  members: z.array(ProjectMemberSchema.omit({ project_id: true })).default([]).catch([]),
+}).loose();
+
+export const ListPrivateProjectsResponseSchema = z.object({
+  projects: z.array(z.unknown()).default([]).catch([]).transform((rows) =>
+    rows.flatMap((row) => {
+      const parsed = PrivateProjectOverviewSchema.safeParse(row);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  ),
+  total: z.number().default(0).catch(0),
 }).loose();
 
 // The viewer's own project subscription (`/api/projects/:id/subscription`).
@@ -2040,6 +2081,9 @@ const SubscriberSchema = z.object({
   user_id: z.string(),
   reason: z.string(),
   created_at: z.string(),
+  // An unknown or malformed tier shows no badge; it must not drop the row,
+  // which would read as "not subscribed".
+  delivery: z.enum(["all", "key_updates", "delegated"]).optional().catch(undefined),
 }).loose();
 
 export const SubscribersListSchema = z.array(SubscriberSchema);
@@ -2498,12 +2542,51 @@ const ChatChannelSourceSchema = z.object({
   route_revision: z.number().default(0),
 }).loose();
 
+export const ChatExecutionConfigSchema = z.object({
+  model: z.string().nullable().optional().catch(null),
+  thinking_level: z.string().nullable().optional().catch(null),
+  service_tier: z.string().nullable().optional().catch(null),
+  approval_policy: z.enum(["on-request", "full-access"]).nullable().optional().catch(null),
+});
+
+export const ChatExecutionConfigCapabilitiesSchema = z.object({
+  model: z.boolean().catch(false),
+  thinking_level: z.boolean().catch(false),
+  service_tier: z.boolean().catch(false),
+  approval_policy: z.boolean().catch(false),
+});
+
+export const ChatEffectiveExecutionConfigSchema = z.object({
+  model: z.string().catch(""),
+  thinking_level: z.string().catch(""),
+  service_tier: z.string().catch(""),
+  approval_policy: z.enum(["on-request", "full-access", ""]).catch(""),
+});
+
+export const ChatSessionUpdatedPayloadSchema = z.object({
+  chat_session_id: z.string(),
+  workspace_id: z.string().optional(),
+  title: z.string().optional(),
+  project_id: z.string().nullable().optional(),
+  pinned: z.boolean().optional(),
+  status: z.enum(["active", "archived"]).optional(),
+  updated_at: z.string().optional(),
+  execution_config: ChatExecutionConfigSchema.nullable().optional(),
+  effective_execution_config: ChatEffectiveExecutionConfigSchema.optional(),
+  execution_config_supported: z.boolean().optional(),
+  execution_config_capabilities: ChatExecutionConfigCapabilitiesSchema.optional(),
+}).loose();
+
 export const ChatSessionSchema: z.ZodType<ChatSession> = z.object({
   id: z.string(),
   workspace_id: z.string().default(""),
   agent_id: z.string().default(""),
   creator_id: z.string().default(""),
   project_id: z.string().nullable().optional(),
+  execution_config: ChatExecutionConfigSchema.optional().catch(undefined),
+  effective_execution_config: ChatEffectiveExecutionConfigSchema.optional().catch(undefined),
+  execution_config_supported: z.boolean().catch(false),
+  execution_config_capabilities: ChatExecutionConfigCapabilitiesSchema.optional().catch(undefined),
   title: z.string().default(""),
   status: z.enum(["active", "archived"]).catch("active"),
   has_unread: z.boolean().default(false),
@@ -3178,6 +3261,22 @@ export const InboxItemListSchema = z.array(
       read: z.boolean(),
       archived: z.boolean(),
       created_at: z.string(),
+      snoozed_until: z.string().nullish(),
+      snoozed_at: z.string().nullish(),
+    })
+    .loose(),
+);
+
+// The viewer's snoozed issues (`/api/inbox/snoozed` GET). A malformed body
+// reads as nothing snoozed.
+export const SnoozedInboxListSchema = z.array(
+  z
+    .object({
+      issue_id: z.string(),
+      item_id: z.string(),
+      snoozed_until: z.string(),
+      snoozed_at: z.string(),
+      updates: z.number().int().nonnegative(),
     })
     .loose(),
 );
@@ -3211,6 +3310,7 @@ export const ArchivedInboxFacetsSchema = z.object({
 }));
 
 export const EMPTY_INBOX_ITEMS: InboxItem[] = [];
+export const EMPTY_SNOOZED_INBOX: SnoozedInboxIssue[] = [];
 
 // Billing schemas (cloud-billing proxy surface)
 //
@@ -3531,6 +3631,55 @@ export const WorkspaceSubscriptionSummarySchema = z
       },
     }),
   );
+
+const BATCH_ISSUE_OUTCOMES: readonly string[] = [
+  "updated",
+  "unchanged",
+  "skipped",
+  "would_update",
+  "deleted",
+  "would_delete",
+] satisfies BatchIssueOutcome[];
+
+// An outcome this client does not know is not a confirmed write: it reads as
+// skipped, never as success.
+const BatchIssueResultSchema = z
+  .object({
+    issue_id: z.string().min(1),
+    identifier: z.string().optional().catch(undefined),
+    outcome: z.string(),
+    code: z.string().optional().catch(undefined),
+    message: z.string().optional().catch(undefined),
+  })
+  .loose()
+  .transform(
+    (value): BatchIssueResult => ({
+      issue_id: value.issue_id,
+      identifier: value.identifier,
+      outcome: BATCH_ISSUE_OUTCOMES.includes(value.outcome) ? (value.outcome as BatchIssueOutcome) : "skipped",
+      code: value.code,
+      message: value.message,
+    }),
+  );
+
+/** `results` is absent on servers that predate per-issue batch results. */
+export const BatchUpdateIssuesResponseSchema = z
+  .object({
+    updated: z.number().int().nonnegative(),
+    results: z.array(BatchIssueResultSchema).optional(),
+    dry_run: z.boolean().optional().catch(undefined),
+  })
+  .loose()
+  .transform(
+    (value): BatchUpdateIssuesResponse => ({
+      updated: value.updated,
+      ...(value.results ? { results: value.results } : {}),
+      ...(value.dry_run !== undefined ? { dry_run: value.dry_run } : {}),
+    }),
+  );
+
+/** A batch response that failed validation: whatever was written is unknown. */
+export const UNCONFIRMED_BATCH_UPDATE: BatchUpdateIssuesResponse = { updated: 0, unconfirmed: true };
 
 export const IssueLimitUsageSchema = z
   .object({
@@ -4558,3 +4707,28 @@ export const WorkspaceListItemSchema = z.object({
 export const WorkspacePinnedSchema = z.object({
   pinned_at: z.iso.datetime({ offset: true }).nullable().catch(null),
 });
+
+// Native task approvals: unknown enums or missing execution fences never create an actionable request.
+export const TaskApprovalSchema = z.object({
+  id: z.string().min(1),
+  task_id: z.string().min(1),
+  runtime_id: z.string().min(1).catch("").default(""),
+  dispatched_at: z.string().min(1).catch("").default(""),
+  execution_id: z.string().min(1).catch("").default(""),
+  native_request_id: z.string().default(""),
+  kind: z.enum(["command", "file_change", "permissions", "unsupported"]).catch("unsupported"),
+  method: z.string().default(""),
+  params: z.record(z.string(), z.unknown()).default({}),
+  status: z.enum(["pending", "decided", "processed", "expired"]).catch("expired"),
+  decision: z.enum(["approve", "deny"]).nullable().catch(null).default(null),
+  created_at: z.string().default(""),
+  decided_at: z.string().nullable().catch(null).default(null),
+  processed_at: z.string().nullable().catch(null).default(null),
+  can_decide: z.boolean().catch(false).default(false),
+}).transform((approval) => ({
+  ...approval,
+  can_decide: approval.can_decide && approval.kind !== "unsupported" && approval.status === "pending" &&
+    approval.decision === null && !!approval.runtime_id && !!approval.dispatched_at && !!approval.execution_id,
+}));
+
+export const TaskApprovalListSchema = z.array(TaskApprovalSchema);

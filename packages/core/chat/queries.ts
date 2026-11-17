@@ -6,6 +6,8 @@ import type {
   ChatQuickActionsFailureState,
   ChatQuickActionsPendingState,
   ChatSession,
+  ChatExecutionConfig,
+  ChatExecutionConfigSupport,
 } from "../types/chat";
 
 /**
@@ -70,6 +72,16 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 export function isTaskMessageTaskId(taskId: string | null | undefined): taskId is string {
   return typeof taskId === "string" && UUID_PATTERN.test(taskId);
+}
+
+/** Default new drafts only after server confirmation; runtime visibility is an independent gate. */
+export function getNewChatExecutionConfig(
+  support?: ChatExecutionConfigSupport | null,
+): ChatExecutionConfig {
+  return support?.execution_config_supported === true &&
+    support.execution_config_capabilities?.approval_policy === true
+    ? { approval_policy: "on-request" }
+    : {};
 }
 
 export function chatSessionsOptions(wsId: string) {

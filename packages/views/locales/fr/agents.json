@@ -888,6 +888,15 @@
     "failed_indicator": "En échec"
   },
   "transcript": {
+    "conversation": "Conversation",
+    "execution_log": "Journal d’exécution",
+    "final_reply": "Réponse finale",
+    "guidance_label": "Ajouter des consignes à cette exécution",
+    "guidance_send": "Envoyer les consignes",
+    "guidance_failed": "Impossible d’envoyer les consignes. Votre texte a été conservé.",
+    "guidance_shared": "Visible dans le fil de commentaires de la tâche.",
+    "guidance_unavailable": "Cette exécution ne peut pas recevoir de consignes supplémentaires.",
+    "guidance_ended": "Cette exécution est terminée.",
     "dialog_title": "Transcription d'exécution de l'agent",
     "status_running": "En cours",
     "status_completed": "Terminée",

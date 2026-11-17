@@ -401,9 +401,12 @@ type AgentTaskResponse struct {
 	// cannot see (MUL-8472): only identity, status, timing and usage remain.
 	Restricted bool `json:"restricted,omitempty"`
 
-	StartClaimSupported      bool                   `json:"start_claim_supported,omitempty"`
-	CancelledByCommentChange bool                   `json:"cancelled_by_comment_change,omitempty"`
-	CancelledBy              *TaskCancellationActor `json:"cancelled_by,omitempty"`
+	StartClaimSupported bool `json:"start_claim_supported,omitempty"`
+	// ExecutionConfig is an immutable send-time override only on daemon claims.
+	ExecutionConfig          *service.ExecutionConfig `json:"execution_config,omitempty"`
+	NativeApprovalSupported  bool                     `json:"native_approval_supported,omitempty"`
+	CancelledByCommentChange bool                     `json:"cancelled_by_comment_change,omitempty"`
+	CancelledBy              *TaskCancellationActor   `json:"cancelled_by,omitempty"`
 
 	ID                   string                 `json:"id"`
 	AgentID              string                 `json:"agent_id"`
@@ -470,6 +473,7 @@ type AgentTaskResponse struct {
 	ProjectID          string                   `json:"project_id,omitempty"`          // issue's project, when present
 	ProjectTitle       string                   `json:"project_title,omitempty"`       // for surfacing in agent context
 	ProjectDescription string                   `json:"project_description,omitempty"` // durable project-level context injected into the brief
+	ProjectArchived    bool                     `json:"project_archived,omitempty"`    // project is archived: the brief tells the agent not to file new issues into it
 	ProjectResources   []ProjectResourceData    `json:"project_resources,omitempty"`   // resources attached to the project
 	CreatedAt          string                   `json:"created_at"`
 	PriorSessionID     string                   `json:"prior_session_id,omitempty"` // session ID from a previous task on same issue

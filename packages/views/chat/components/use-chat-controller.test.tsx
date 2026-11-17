@@ -15,6 +15,8 @@ const h = vi.hoisted(() => {
     activeSessionId: null as string | null,
     selectedAgentId: null as string | null,
     selectedProjectId: null as string | null,
+    draftExecutionConfigs: {} as Record<string, import("@multica/core/types/chat").ChatExecutionConfig>,
+    clearDraftExecutionConfig: vi.fn(),
     setActiveSession: vi.fn((id: string | null) => {
       store.activeSessionId = id;
     }),
@@ -137,6 +139,7 @@ vi.mock("@multica/core/hooks/use-file-upload", () => ({
 }));
 vi.mock("@multica/core/chat/mutations", () => ({
   useCreateChatSession: () => ({ mutateAsync: h.createSessionMutate }),
+  useSetChatSessionExecutionConfig: () => ({ mutateAsync: vi.fn() }),
   useMarkChatSessionRead: () => ({ mutate: h.markReadMutate }),
   useSetChatSessionArchived: () => ({ mutate: h.archivedMutate }),
   useSetChatSessionProject: () => ({

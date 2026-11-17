@@ -135,5 +135,37 @@
   },
   "navigation": {
     "open_in_new_tab": "在新标签页打开"
+  },
+  "task_approvals": {
+    "title": "原生审批",
+    "kind": {
+      "command": "命令",
+      "file_change": "文件变更",
+      "permissions": "权限",
+      "unsupported": "不支持的请求"
+    },
+    "status": {
+      "pending": "等待人工审批",
+      "decided": "已决定，等待执行继续",
+      "processed": "已处理",
+      "expired": "已失效"
+    },
+    "decision": {
+      "approve": "已单次批准",
+      "deny": "已拒绝"
+    },
+    "approve": "单次批准",
+    "deny": "拒绝",
+    "submitting": "正在提交决定…",
+    "read_only": "仅获授权的人员可以审批。",
+    "command": "命令",
+    "cwd": "工作目录",
+    "changes": "文件变更",
+    "permissions": "权限范围",
+    "details": "请求详情",
+    "load_failed": "审批加载失败。",
+    "decision_failed": "决定提交失败。",
+    "unavailable": "此任务的原生审批暂不可用。",
+    "retry": "重试"
   }
 }

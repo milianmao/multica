@@ -12,6 +12,8 @@ import { useAuthStore } from "@multica/core/auth";
 import { getCurrentWsId } from "@multica/core/platform";
 import { agentListOptions, memberListOptions } from "@multica/core/workspace/queries";
 import { projectListOptions } from "@multica/core/projects/queries";
+import { runtimeListOptions } from "@multica/core/runtimes";
+import type { ChatExecutionConfig } from "@multica/core/types/chat";
 import { canAssignAgent } from "../../issues/components/pickers/assignee-picker";
 import { api, dispatchReasonCode } from "@multica/core/api";
 import {
@@ -26,12 +28,14 @@ import {
   chatKeys,
   isTaskMessageTaskId,
   sortChatSessions,
+  getNewChatExecutionConfig,
 } from "@multica/core/chat/queries";
 import {
   useCreateChatSession,
   useMarkChatSessionRead,
   useSetChatSessionProject,
   useSetChatSessionArchived,
+  useSetChatSessionExecutionConfig,
 } from "@multica/core/chat/mutations";
 import { useChatStore } from "@multica/core/chat";
 import { upsertChatMessageToCaches } from "@multica/core/chat/message-cache";
@@ -203,6 +207,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
   const { data: projects = [], isSuccess: projectsLoaded } = useQuery(
     projectListOptions(wsId),
   );
+  const { data: runtimes = [] } = useQuery({ ...runtimeListOptions(wsId), enabled: !!wsId });
   const {
     data: rawMessagePages,
     isLoading: messagesLoading,
@@ -307,6 +312,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
 
   const qc = useQueryClient();
   const createSession = useCreateChatSession();
+  const setSessionExecution = useSetChatSessionExecutionConfig();
   const markRead = useMarkChatSessionRead();
   const setSessionProject = useSetChatSessionProject();
   const setArchived = useSetChatSessionArchived();
@@ -345,6 +351,12 @@ export function useChatController(opts?: { isActive?: boolean }) {
     availableAgents[0] ??
     null;
   const isAgentRuntimeBound = !!activeAgent && hasAgentRuntime(activeAgent);
+  const runtime = runtimes.find((row) => row.id === activeAgent?.runtime_id) ?? null;
+  // A previous session for this same agent can advertise backend categories
+  // for a new draft. No session signal means unknown, not implicit support.
+  const executionConfigSupport = activeSessionId
+    ? currentSession
+    : sessions.find((row) => row.agent_id === activeAgent?.id && row.execution_config_supported === true);
 
   // A session outlives the permission that created it. The agent can be flipped
   // to personal, change owner, or drop this member from its allow-list, and the
@@ -400,8 +412,9 @@ export function useChatController(opts?: { isActive?: boolean }) {
   }, [isActive, appForeground, activeSessionId, currentHasUnread]);
 
   const sessionPromiseRef = useRef<Promise<string | null> | null>(null);
+  /** Create from a send-time snapshot; unknown servers reveal support before a new default is saved. */
   const ensureSession = useCallback(
-    async (): Promise<string | null> => {
+    async (executionConfig?: ChatExecutionConfig): Promise<string | null> => {
       // Trust the current session id only when it's real: present in the
       // loaded list, or a just-created one still awaiting the list refetch
       // (has an optimistic write). A dangling id (deleted / no access) must not
@@ -425,7 +438,21 @@ export function useChatController(opts?: { isActive?: boolean }) {
           const session = await createSession.mutateAsync({
             agent_id: activeAgent.id,
             project_id: activeProjectId,
+            ...(executionConfig && Object.keys(executionConfig).length > 0
+              ? { execution_config: executionConfig } : {}),
           });
+          if (executionConfig && Object.keys(executionConfig).length > 0 &&
+              session.execution_config_supported !== true) {
+            throw new Error("Chat execution config is not supported by this server");
+          }
+          // Never modify old sessions or let an old server silently ignore the
+          // new approval default. Explicit null deliberately keeps the old policy.
+          if (executionConfig?.approval_policy === undefined) {
+            const defaults = getNewChatExecutionConfig(session);
+            if (defaults.approval_policy) {
+              await setSessionExecution.mutateAsync({ sessionId: session.id, config: defaults });
+            }
+          }
           return session.id;
         } finally {
           sessionPromiseRef.current = null;
@@ -439,6 +466,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
       activeAgent,
       activeProjectId,
       createSession,
+      setSessionExecution,
       sessions,
       sessionsLoaded,
       qc,
@@ -465,6 +493,10 @@ export function useChatController(opts?: { isActive?: boolean }) {
   // (MUL-5181 L2); surfaces only forward whether the affordance exists.
   const uploadEnabled = !!activeAgent;
 
+  /**
+   * Captures new-session execution options before asynchronous creation and clears
+   * only the accepted snapshot, leaving concurrent edits and failed-send input intact.
+   */
   const handleSend = useCallback(
     async (
       content: string,
@@ -510,6 +542,11 @@ export function useChatController(opts?: { isActive?: boolean }) {
 
       const finalContent = content;
       const isNewSession = !activeSessionId;
+      const rawExecutionDraft = isNewSession
+        ? useChatStore.getState().draftExecutionConfigs[activeAgent.id] : undefined;
+      const executionSnapshot = isNewSession
+        ? { ...getNewChatExecutionConfig(executionConfigSupport), ...rawExecutionDraft }
+        : undefined;
 
       apiLogger.info("sendChatMessage.start", {
         sessionId: activeSessionId,
@@ -521,7 +558,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
 
       let sessionId: string | null = null;
       try {
-        sessionId = await ensureSession();
+        sessionId = await ensureSession(executionSnapshot);
       } catch (err) {
         apiLogger.error("sendChatMessage.ensureSession.error", err);
         // A revoked invoke permission blocks session create with a structured
@@ -619,6 +656,9 @@ export function useChatController(opts?: { isActive?: boolean }) {
         setActiveSession(sessionId);
       }
       commitInput?.({ extraDraftKeys: [sessionId], clearEditor: stillOnSourceSession });
+      if (isNewSession && rawExecutionDraft && getCurrentWsId() === wsId) {
+        live.clearDraftExecutionConfig(activeAgent.id, rawExecutionDraft);
+      }
 
       if (stopRequestedBeforeTaskRef.current) {
         stopRequestedBeforeTaskRef.current = false;
@@ -653,6 +693,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
       pendingTask,
       pendingTaskId,
       isAgentRuntimeBound,
+      executionConfigSupport,
       ensureSession,
       cancelChatTask,
       qc,
@@ -865,6 +906,8 @@ export function useChatController(opts?: { isActive?: boolean }) {
     isAgentAccessRevoked,
     isAgentRuntimeBound,
     activeAgent,
+    runtime,
+    executionConfigSupport,
     noAgent,
     availability,
     // messages

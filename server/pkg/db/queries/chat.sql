@@ -19,6 +19,27 @@ WHERE id = $1;
 SELECT * FROM chat_session
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: UpdateChatSessionExecutionConfig :one
+-- The caller owns the session lock before validating and merging overrides.
+UPDATE chat_session
+SET execution_config = @execution_config::jsonb, updated_at = now()
+WHERE id = @id::uuid AND workspace_id = @workspace_id::uuid
+RETURNING *;
+
+-- name: ListChatExecutionConfigs :many
+-- Batch the effective settings for session response projections. Runtime
+-- pointers and provider settings come from the current shared agent, not the
+-- daemon-owned resume pointer on chat_session.
+SELECT cs.id, cs.execution_config, a.runtime_id,
+       COALESCE(a.model, '')::text AS model,
+       COALESCE(a.thinking_level, '')::text AS thinking_level,
+       COALESCE(a.service_tier, '')::text AS service_tier,
+       COALESCE(r.provider, '')::text AS provider
+FROM chat_session AS cs
+LEFT JOIN agent AS a ON a.id = cs.agent_id AND a.workspace_id = cs.workspace_id
+LEFT JOIN agent_runtime AS r ON r.id = a.runtime_id AND r.workspace_id = cs.workspace_id
+WHERE cs.workspace_id = @workspace_id::uuid AND cs.id = ANY(@ids::uuid[]);
+
 -- name: ListChatSessionCreators :many
 -- Owners of a page of chat tasks, so task lists can hide the content of chat
 -- tasks the viewer did not start.
@@ -1198,6 +1219,13 @@ SET chat_input_task_id = id
 WHERE id = $1
 RETURNING *;
 
+-- name: SetChatTaskExecutionConfig :one
+-- Preserve other task context while freezing the send-time execution settings.
+UPDATE agent_task_queue
+SET context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('execution_config', @execution_config::jsonb)
+WHERE id = @id::uuid AND chat_session_id = @chat_session_id::uuid
+RETURNING *;
+
 -- name: GetLastChatTaskSession :one
 -- Returns the most recent task in this chat session that managed to record a
 -- session_id. Includes completed, failed AND cancelled tasks: each of them may
@@ -1267,7 +1295,10 @@ WITH retired_sessions AS (
       )
 ), latest_per_session AS (
     SELECT DISTINCT ON (t.session_id)
-        t.session_id, t.work_dir, t.runtime_id, t.status, t.failure_reason, t.error, t.completed_at
+        t.session_id, t.work_dir, t.runtime_id, t.status, t.failure_reason,
+        -- Match the issue resume query and taskfailure.WithoutCodebuddyProtocolSummary.
+        regexp_replace(COALESCE(t.error, ''), '^\[codebuddy protocol: exit_code=-?[0-9]+ stdout_bytes=[0-9]+ stderr_bytes=[0-9]+ event_count=[0-9]+ invalid_event_count=[0-9]+ assistant_event_count=[0-9]+ tool_use_count=[0-9]+ saw_result=(true|false) result_is_error=(true|false) result_bytes=[0-9]+ last_assistant_bytes=[0-9]+ scanner_error=(true|false)\]$', '', 'gn') AS error,
+        t.completed_at
     FROM agent_task_queue t
     WHERE t.chat_session_id = sqlc.arg('chat_session_id')
       AND (

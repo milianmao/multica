@@ -83,6 +83,37 @@ export interface ChatChannelSource {
   route_revision: number;
 }
 
+/** Session-local runtime overrides: omitted PATCH fields stay unchanged, null inherits. */
+export interface ChatExecutionConfig {
+  model?: string | null;
+  thinking_level?: string | null;
+  /** Kept only for atomic model-change cleanup; Chat has no speed picker. */
+  service_tier?: string | null;
+  approval_policy?: "on-request" | "full-access" | null;
+}
+
+/** Category-level backend support; exact model options still come from the runtime catalog. */
+export interface ChatExecutionConfigCapabilities {
+  model: boolean;
+  thinking_level: boolean;
+  service_tier: boolean;
+  approval_policy: boolean;
+}
+
+/** Read-only capability signal usable by both a session and a not-yet-created draft. */
+export interface ChatExecutionConfigSupport {
+  execution_config_supported?: boolean;
+  execution_config_capabilities?: ChatExecutionConfigCapabilities;
+}
+
+/** Server-resolved defaults for display, never written back as session overrides. */
+export interface ChatEffectiveExecutionConfig {
+  model: string;
+  thinking_level: string;
+  service_tier: string;
+  approval_policy: "on-request" | "full-access" | "";
+}
+
 export interface ChatSession {
   id: string;
   workspace_id: string;
@@ -91,6 +122,12 @@ export interface ChatSession {
   /** Durable project context for every turn in this session. Null when the
    *  conversation uses workspace context only; optional for older servers. */
   project_id?: string | null;
+  /** Overrides for future turns, never the configuration of an already queued task. */
+  execution_config?: ChatExecutionConfig;
+  effective_execution_config?: ChatEffectiveExecutionConfig;
+  /** Missing on older servers: callers must require explicit true before editing. */
+  execution_config_supported?: boolean;
+  execution_config_capabilities?: ChatExecutionConfigCapabilities;
   title: string;
   status: "active" | "archived";
   /** True when the session has any unread assistant replies. List-only.

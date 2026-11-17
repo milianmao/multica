@@ -1,4 +1,5 @@
 import type { RuntimeModel } from "@multica/core/types";
+import type { ChatExecutionConfig, ChatEffectiveExecutionConfig } from "@multica/core/types/chat";
 import {
   findModelCapabilityEntry,
   thinkingLevelRequiredForProvider,
@@ -97,4 +98,26 @@ export function buildModelChangeUpdate(input: {
   if (input.serviceTier && !supportsTier) update.service_tier = "";
 
   return update;
+}
+
+/** Preserve null inheritance while reusing the inspector's atomic effort/tier cleanup. */
+export function buildChatModelChangeUpdate(input: {
+  provider: string;
+  model: string | null;
+  config: ChatExecutionConfig;
+  inherited: Pick<ChatEffectiveExecutionConfig, "model" | "thinking_level" | "service_tier">;
+  catalog: ModelCatalog;
+}): ChatExecutionConfig {
+  const cleanup = buildModelChangeUpdate({
+    provider: input.provider,
+    model: input.model ?? input.inherited.model,
+    thinkingLevel: input.config.thinking_level ?? input.inherited.thinking_level,
+    serviceTier: input.config.service_tier ?? input.inherited.service_tier,
+    catalog: input.catalog,
+  });
+  return {
+    model: input.model,
+    thinking_level: cleanup.thinking_level ?? input.config.thinking_level ?? null,
+    service_tier: cleanup.service_tier ?? input.config.service_tier ?? null,
+  };
 }

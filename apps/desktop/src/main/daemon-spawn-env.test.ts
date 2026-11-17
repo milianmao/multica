@@ -72,6 +72,25 @@ describe("daemonSpawnEnv", () => {
     expect(env).toEqual({ ...source, MULTICA_LAUNCHED_BY: "desktop" });
   });
 
+  it("bypasses only the selected API and retains the model proxies", () => {
+    const source = {
+      HTTP_PROXY: "http://127.0.0.1:7897",
+      HTTPS_PROXY: "http://127.0.0.1:7897",
+      NO_PROXY: "existing.internal",
+      no_proxy: "localhost,127.0.0.1",
+      No_Proxy: "mixed.internal",
+    };
+
+    const env = daemonSpawnEnv(source, "http://188.239.16.95:18080");
+    const bypass = "existing.internal,localhost,127.0.0.1,mixed.internal,188.239.16.95:18080";
+
+    expect(env).toEqual({
+      ...source,
+      NO_PROXY: bypass,
+      no_proxy: bypass,
+      MULTICA_LAUNCHED_BY: "desktop",
+    });
+  });
   it("does not mutate the source env", () => {
     const source = { ...LAUNCHER_ENV, PATH: DEV_PATH };
 

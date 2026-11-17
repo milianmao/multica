@@ -33,6 +33,14 @@ import type { Attachment, Project } from "@multica/core/types";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { ClearablePillButton } from "../../common/pill-button";
 import { useT } from "../../i18n";
+import {
+  useComposerVoice,
+  VoiceErrorRow,
+  VoiceHud,
+  VoiceMicButton,
+  VoiceSetupDialog,
+  VoiceStrip,
+} from "../../voice";
 import { useCommentDraftStore } from "@multica/core/issues/stores";
 import { composeAnnotatedReply, EMPTY_REPLY_ANNOTATIONS, hasReplyIntent } from "@multica/core/drafts/reply-annotation";
 import { ReplyAnnotations } from "../../issues/components/reply-annotations";
@@ -155,6 +163,8 @@ interface ChatInputProps {
    */
   draftKeyOverride?: string;
   editorKeyOverride?: string;
+  /** Mounted but not shown (the closed floating window): voice input is off. */
+  hidden?: boolean;
   /** Saved quotes from this session's replies, sent ahead of the typed text. */
   annotations?: Pick<ChatAnnotations, "draftKey" | "composer" | "editAnnotation">;
 }
@@ -191,6 +201,7 @@ export function ChatInput({
   focusRequest,
   draftKeyOverride,
   editorKeyOverride,
+  hidden = false,
   annotations: annotationSlot,
 }: ChatInputProps) {
   const { t } = useT("chat");
@@ -200,6 +211,7 @@ export function ChatInput({
   const editorAreaRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const selectedAgentId = useChatStore((s) => s.selectedAgentId);
   // Two keys with deliberately different concerns:
   //
   // `draftKey` — zustand storage key. Scopes the in-progress draft per session
@@ -695,6 +707,15 @@ export function ChatInput({
     !isProjectUpdating;
   const selectedProject = projects.find((project) => project.id === projectId);
   const canSubmitNow = !disabled && !noAgent && (!isRunning || !!allowSubmitWhileRunning);
+  const voice = useComposerVoice({
+    insert: (text) => editorRef.current?.insertText(text) ?? false,
+    submit: canSubmitNow ? () => void submit() : undefined,
+    // The editor is shared across sessions and agents; a switch must not
+    // carry a transcript (or its send) over to the new conversation.
+    scope: draftKeyOverride ?? `${draftKey}:${selectedAgentId ?? ""}`,
+    hidden,
+    disabled: !!disabled || !!noAgent,
+  });
 
   return (
     <>
@@ -737,7 +758,7 @@ export function ChatInput({
           // composer without a definite height (percentage max-height would
           // then resolve to none).
           CHAT_COLUMN,
-          "relative flex min-h-16 max-h-96 flex-col rounded-lg border border-surface-border bg-surface pb-9 transition-[border-color,box-shadow] focus-within:border-brand focus-within:ring-2 focus-within:ring-ring/20",
+          "relative flex min-h-16 max-h-96 flex-col rounded-lg border border-surface-border bg-surface transition-[border-color,box-shadow] focus-within:border-brand focus-within:ring-2 focus-within:ring-ring/20",
           // Visual + interaction lock when there's no agent. We don't
           // toggle ContentEditor's editable mode (Tiptap can't switch
           // cleanly post-mount, and the prop has been removed); instead
@@ -747,6 +768,8 @@ export function ChatInput({
           noAgent && "pointer-events-none opacity-60",
         )}
         aria-disabled={noAgent || undefined}
+        ref={voice.rootRef}
+        onFocusCapture={voice.onFocusCapture}
         onKeyDown={(event) => {
           // Tab is the editor's when it wants it (list indent, the @ and /
           // pickers): those handle the key first and prevent its default.
@@ -853,8 +876,24 @@ export function ChatInput({
             showBubbleMenu
           />
         </div>
-        {(uploadEnabled || projectSelectionEnabled || leftAdornment) && (
-          <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1">
+        <VoiceHud voice={voice} />
+        <VoiceSetupDialog voice={voice} />
+        <VoiceErrorRow voice={voice} className="mx-2 mb-1" />
+        {voice.showStrip && (
+          <div className="absolute inset-x-1.5 bottom-1 flex items-center">
+            <VoiceStrip voice={voice} />
+          </div>
+        )}
+        {/* Layout flow reserves space for wrapped entrances without covering the editor or send button.
+            While the voice strip owns the bottom row it keeps its footprint but stops rendering. */}
+        <div
+          data-slot="chat-input-footer"
+          className={cn(
+            "flex min-w-0 shrink-0 items-end gap-1 px-1.5 pb-1",
+            voice.showStrip && "invisible",
+          )}
+        >
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
             {(uploadEnabled || projectSelectionEnabled) && (
               <ChatAddMenu
                 onSelectFile={uploadEnabled
@@ -868,60 +907,61 @@ export function ChatInput({
             )}
             {leftAdornment}
           </div>
-        )}
-        <div className="absolute bottom-1 right-1.5 flex items-center gap-1">
-          {pageContext && (
-            <IconButton
-              type="button"
-              aria-pressed={!!attachedPage}
-              onClick={togglePageContext}
-              label={t(($) => $.input.page_context_add)}
-              shortcut={<ShortcutKeycaps shortcut={PAGE_CONTEXT_SHORTCUT} decorative />}
-              className="text-muted-foreground aria-pressed:bg-accent aria-pressed:text-foreground"
-            >
-              <Scan />
-            </IconButton>
-          )}
-          <SubmitButton
-            onClick={submit}
-            disabled={hasNothingToSend || submitting || !!disabled || !!noAgent}
-            loading={submitting}
-            busy={gate.uploading}
-            // Queue-capable runs reuse this one action slot: an empty composer
-            // offers Stop, while live content swaps it to Queue Send. Older
-            // servers cannot accept follow-ups, so they remain stop-only. An
-            // upload blocks submit, so it also falls back to Stop rather than
-            // removing chat's only cancellation path; the attachment node
-            // remains the visible upload-progress surface in the editor.
-            running={
-              !!isRunning &&
-              (!allowSubmitWhileRunning || hasNothingToSend || gate.uploading)
-            }
-            onStop={onStop}
-            // While blocked, the placeholder copy is exactly the reason.
-            disabledReason={gate.uploading
-              ? tEditor(($) => $.upload.in_progress)
-              : disabled || noAgent
-                ? placeholder
-                : undefined}
-            tooltip={isRunning
-              ? t(($) => $.input.queue_send_tooltip)
-              : sendShortcut
-                ? (
-                  <>
-                    {t(($) => $.input.send_tooltip)}
-                    <ShortcutKeycaps shortcut={sendShortcut} decorative />
-                  </>
-                )
-                : t(($) => $.input.send_tooltip)}
-            ariaLabel={gate.uploading
-              ? tEditor(($) => $.upload.in_progress)
-              : isRunning
+          <div className="flex shrink-0 items-center gap-1">
+            <VoiceMicButton voice={voice} />
+            {pageContext && (
+              <IconButton
+                type="button"
+                aria-pressed={!!attachedPage}
+                onClick={togglePageContext}
+                label={t(($) => $.input.page_context_add)}
+                shortcut={<ShortcutKeycaps shortcut={PAGE_CONTEXT_SHORTCUT} decorative />}
+                className="text-muted-foreground aria-pressed:bg-accent aria-pressed:text-foreground"
+              >
+                <Scan />
+              </IconButton>
+            )}
+            <SubmitButton
+              onClick={submit}
+              disabled={hasNothingToSend || submitting || !!disabled || !!noAgent}
+              loading={submitting}
+              busy={gate.uploading}
+              // Queue-capable runs reuse this one action slot: an empty composer
+              // offers Stop, while live content swaps it to Queue Send. Older
+              // servers cannot accept follow-ups, so they remain stop-only. An
+              // upload blocks submit, so it also falls back to Stop rather than
+              // removing chat's only cancellation path; the attachment node
+              // remains the visible upload-progress surface in the editor.
+              running={
+                !!isRunning &&
+                (!allowSubmitWhileRunning || hasNothingToSend || gate.uploading)
+              }
+              onStop={onStop}
+              // While blocked, the placeholder copy is exactly the reason.
+              disabledReason={gate.uploading
+                ? tEditor(($) => $.upload.in_progress)
+                : disabled || noAgent
+                  ? placeholder
+                  : undefined}
+              tooltip={isRunning
                 ? t(($) => $.input.queue_send_tooltip)
-              : t(($) => $.input.send_tooltip)}
-            stopTooltip={t(($) => $.input.stop_tooltip)}
-            stopAriaLabel={t(($) => $.input.stop_tooltip)}
-          />
+                : sendShortcut
+                  ? (
+                    <>
+                      {t(($) => $.input.send_tooltip)}
+                      <ShortcutKeycaps shortcut={sendShortcut} decorative />
+                    </>
+                  )
+                  : t(($) => $.input.send_tooltip)}
+              ariaLabel={gate.uploading
+                ? tEditor(($) => $.upload.in_progress)
+                : isRunning
+                  ? t(($) => $.input.queue_send_tooltip)
+                : t(($) => $.input.send_tooltip)}
+              stopTooltip={t(($) => $.input.stop_tooltip)}
+              stopAriaLabel={t(($) => $.input.stop_tooltip)}
+            />
+          </div>
         </div>
         {uploadEnabled && isDragOver && <FileDropOverlay />}
       </div>

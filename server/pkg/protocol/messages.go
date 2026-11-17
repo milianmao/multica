@@ -5,6 +5,9 @@ import "encoding/json"
 const (
 	DaemonCapabilitySkillBundlesV1      = "skill-bundles-v1"
 	DaemonCapabilityCoalescedCommentsV1 = "coalesced-comments-v1"
+	// DaemonCapabilityNativeApprovalV1 promises per-execution Codex approval
+	// registration, human decisions and strict sandbox enforcement.
+	DaemonCapabilityNativeApprovalV1 = "native-approval-v1"
 	// DaemonCapabilityLocalWorktreeV1 advertises that the daemon implements
 	// worktree mode for local_directory resources (execution_mode=worktree).
 	//
@@ -32,6 +35,9 @@ const (
 	// the extra deferred-task lookup for clients that opt in, and an older
 	// server's missing fields make a newer daemon retain its short fallback.
 	DaemonCapabilityClaimPollHintsV1 = "claim-poll-hints-v1"
+	// DaemonCapabilityForceRecheckV1 requests presence-aware batch claim
+	// acknowledgements on both HTTP and WebSocket.
+	DaemonCapabilityForceRecheckV1 = "force-recheck-v1"
 
 	// DaemonCapabilityPlatformSkillV1 advertises that the daemon's runtime
 	// brief names the merged `multica-platform` skill instead of the

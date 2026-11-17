@@ -44,6 +44,7 @@ import type {
 } from "@multica/core/types";
 import type { ChatTimelineItem } from "@multica/core/chat";
 import { buildTimeline } from "../../common/task-transcript";
+import { TaskApprovalCards } from "../../common/task-approval";
 import { readCommandInput, traceToolArgSummary } from "../../common/task-transcript/trace-event-presenter";
 import { OnboardingStarterCards } from "./onboarding-starter-cards";
 import { TaskStatusPill } from "./task-status-pill";
@@ -64,6 +65,9 @@ import { isAnnotatableChatMessage, type ChatAnnotations } from "./use-chat-annot
 // ─── Public component ────────────────────────────────────────────────────
 
 interface ChatMessageListProps {
+  wsId?: string;
+  /** Explicit backend support gate; decisions remain owned by the frozen running task. */
+  showTaskApprovals?: boolean;
   /** Pause bottom-stick effects while a closing floating window fades out. */
   active?: boolean;
   /**
@@ -121,6 +125,8 @@ interface ChatMessageListProps {
 // ordinary prop (re-render, not remount).
 
 interface ChatListContext {
+  wsId?: string;
+  showTaskApprovals: boolean;
   isFetchingOlderMessages: boolean;
   showStatusPill: boolean;
   pendingTask: ChatPendingTask | null | undefined;
@@ -163,16 +169,21 @@ function ChatListHeader({ context }: { context?: ChatListContext }) {
   );
 }
 
-// The Footer now carries only the status pill — task chrome, not content. The
-// live timeline moved into a real row so it can keep its identity when the
-// task completes (see ChatRenderItem).
+// The Footer carries task chrome and native approval requests, not transcript
+// content. The live timeline stays in a real row to retain its identity when
+// the task completes (see ChatRenderItem).
 //
 // The container always renders (even with no pill) so the list keeps a
 // constant bottom inset: without it the last row's own py-2 was the only gap
 // between the final reply (and its follow-up pills) and the composer.
+/** Native approvals stay visible before the first trace row; legacy servers are never probed. */
 function ChatListFooter({ context }: { context?: ChatListContext }) {
+  const taskId = context?.pendingTask?.task_id;
+  const showApprovals = context?.showTaskApprovals && context.showStatusPill &&
+    context.pendingTask?.status === "running" && isTaskMessageTaskId(taskId);
   return (
     <div className={cn(CHAT_COLUMN, "pb-4 space-y-4")}>
+      {showApprovals && taskId && <TaskApprovalCards taskId={taskId} wsId={context?.wsId} />}
       {context?.showStatusPill && context.pendingTask ? (
         <TaskStatusPill
           pendingTask={context.pendingTask}
@@ -189,7 +200,10 @@ const LIST_COMPONENTS: Components<ChatRenderItem, ChatListContext> = {
   Footer: ChatListFooter,
 };
 
+/** Stable virtualized conversation shared by full-page and floating chat surfaces. */
 export function ChatMessageList({
+  wsId,
+  showTaskApprovals = false,
   active = true,
   revealKey = null,
   onRevealed,
@@ -327,6 +341,8 @@ export function ChatMessageList({
   });
 
   const listContext: ChatListContext = {
+    wsId,
+    showTaskApprovals,
     isFetchingOlderMessages,
     showStatusPill,
     pendingTask,
@@ -546,7 +562,10 @@ const MessageBubble = memo(function MessageBubble({
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="rounded-2xl bg-muted px-3.5 py-2 text-body max-w-[80%] break-words">
+        <div
+          data-mc="chat-bubble"
+          className="rounded-2xl bg-muted px-3.5 py-2 text-body max-w-[80%] break-words"
+        >
           {/* User messages are authored as markdown in ContentEditor, so they
            * render through the SAME RichContent as assistant replies and as
            * Issue/Comment — a Mermaid fence a user pastes is a diagram here

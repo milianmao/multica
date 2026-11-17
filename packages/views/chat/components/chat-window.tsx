@@ -50,6 +50,7 @@ import { useChatInputFocus } from "./use-chat-input-focus";
 import { useChatOpenReveal } from "./use-chat-open-reveal";
 import { ChatWindowMessages } from "./chat-window-messages";
 import { ChatInput } from "./chat-input";
+import { ChatExecutionControls } from "./chat-execution-controls";
 import { useChatAnnotations } from "./use-chat-annotations";
 import { ChatQueue } from "./chat-queue";
 import { ChatAppRequests } from "../../common/app-requests";
@@ -346,6 +347,8 @@ export function ChatWindow() {
         {isOpen && (
           <ChatWindowMessages
             sessionId={activeSessionId}
+            wsId={wsId}
+            showTaskApprovals={currentSession?.execution_config_supported === true}
             pendingTask={pendingTask}
             pendingTaskLoading={c.pendingTaskLoading}
             availability={c.availability}
@@ -413,6 +416,7 @@ export function ChatWindow() {
        *  agent has been archived (read-only); locked out entirely when there's
        *  no agent (the EmptyState above carries the CTA). */}
       <ChatInput
+        hidden={!isOpen}
         onSend={c.handleSend}
         restoreDraftRequest={c.restoreDraftRequest}
         conversationStarterRequest={c.conversationStarterRequest}
@@ -439,12 +443,15 @@ export function ChatWindow() {
         projectContextUnsupported={c.projectContextUnsupported}
         isProjectUpdating={c.isProjectUpdating}
         leftAdornment={
-          <AgentDropdown
-            agents={c.availableAgents}
-            activeAgent={activeAgent}
-            userId={c.user?.id}
-            onSelect={c.handleSelectAgent}
-          />
+          <>
+            <AgentDropdown
+              agents={c.availableAgents}
+              activeAgent={activeAgent}
+              userId={c.user?.id}
+              onSelect={c.handleSelectAgent}
+            />
+            <ChatExecutionControls controller={c} />
+          </>
         }
         contextItems={contextItems}
         pageContext={pageContext}

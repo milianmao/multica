@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
+	"github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -31,12 +33,16 @@ const chatSessionTitleMaxLen = 200
 
 // Chat Sessions
 
+// CreateChatSessionRequest keeps execution overrides opt-in for older clients.
 type CreateChatSessionRequest struct {
-	AgentID   string  `json:"agent_id"`
-	Title     string  `json:"title"`
-	ProjectID *string `json:"project_id"`
+	AgentID         string          `json:"agent_id"`
+	Title           string          `json:"title"`
+	ProjectID       *string         `json:"project_id"`
+	ExecutionConfig json.RawMessage `json:"execution_config"`
 }
 
+// CreateChatSession persists explicit overrides with creation while leaving
+// shared agent settings and legacy approval behavior unchanged.
 func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -47,6 +53,9 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 	var req CreateChatSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !requireHumanChatApprovalConfig(w, r, req.ExecutionConfig, false) {
 		return
 	}
 	if req.AgentID == "" {
@@ -129,6 +138,24 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var executionConfig []byte
+	if req.ExecutionConfig != nil {
+		agent, err = qtx.GetAgentForClaimUpdate(r.Context(), agent.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock chat agent")
+			return
+		}
+		if agent.ArchivedAt.Valid {
+			writeError(w, http.StatusBadRequest, "agent is archived")
+			return
+		}
+		executionConfig, err = h.patchChatExecutionConfig(r.Context(), qtx, nil, req.ExecutionConfig, agent)
+		if err != nil {
+			h.writeChatExecutionConfigError(w, err)
+			return
+		}
+	}
+
 	session, err := qtx.CreateChatSession(r.Context(), db.CreateChatSessionParams{
 		ID:          dbid.NewV7(),
 		WorkspaceID: workspaceUUID,
@@ -147,14 +174,26 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ExecutionConfig != nil {
+		session, err = qtx.UpdateChatSessionExecutionConfig(r.Context(), db.UpdateChatSessionExecutionConfigParams{
+			ID: session.ID, WorkspaceID: workspaceUUID, ExecutionConfig: executionConfig,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store chat execution config")
+			return
+		}
+	}
+
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit chat session create")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, chatSessionToResponse(session))
+	h.writeChatSessionResponse(w, r, http.StatusCreated, session)
 }
 
+// ListChatSessions restricts rows to accessible agents and includes the server-owned
+// execution projection rather than exposing a client-maintained copy of agent settings.
 func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -249,6 +288,10 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load chat channel metadata")
 		return
 	}
+	if err := h.hydrateChatExecutionConfigs(r.Context(), resp); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chat execution config")
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -321,6 +364,8 @@ func (h *Handler) gatePublicChatSessionForUser(w http.ResponseWriter, r *http.Re
 	return session, true
 }
 
+// GetChatSession returns an authorized session using the same execution projection
+// as list and update responses, so inherited options converge across client surfaces.
 func (h *Handler) GetChatSession(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -334,25 +379,20 @@ func (h *Handler) GetChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := chatSessionToResponse(session)
-	// hydrateChatSessionChannelMetadata mutates the slice element, so retain a
-	// concrete slice here rather than passing a temporary value to writeJSON.
-	responses := []ChatSessionResponse{resp}
-	if err := h.hydrateChatSessionChannelMetadata(r.Context(), responses); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load chat channel metadata")
-		return
-	}
-	writeJSON(w, http.StatusOK, responses[0])
+	h.writeChatSessionResponse(w, r, http.StatusOK, session)
 }
 
+// UpdateChatSessionRequest distinguishes omitted configuration from null,
+// which clears all session overrides rather than preserving them.
 type UpdateChatSessionRequest struct {
-	Title     *string         `json:"title"`
-	ProjectID json.RawMessage `json:"project_id"`
+	Title           *string         `json:"title"`
+	ProjectID       json.RawMessage `json:"project_id"`
+	ExecutionConfig json.RawMessage `json:"execution_config"`
 }
 
 // UpdateChatSession updates one user-editable field on a chat session. Title
-// is surfaced by inline rename; project_id controls the project context used
-// by subsequent turns. Status and pinned keep their dedicated endpoints,
+// is surfaced by inline rename; project_id and execution_config control only
+// subsequent turns. Status and pinned keep their dedicated endpoints,
 // agent/creator/workspace are immutable, and the resume pointers
 // (session_id / work_dir / runtime_id) remain daemon-owned.
 func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
@@ -370,8 +410,18 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 	}
 	hasTitle := req.Title != nil
 	hasProjectID := req.ProjectID != nil
-	if hasTitle == hasProjectID {
-		writeError(w, http.StatusBadRequest, "exactly one of title or project_id is required")
+	hasExecutionConfig := req.ExecutionConfig != nil
+	providedFields := 0
+	for _, present := range []bool{hasTitle, hasProjectID, hasExecutionConfig} {
+		if present {
+			providedFields++
+		}
+	}
+	if providedFields != 1 {
+		writeError(w, http.StatusBadRequest, "exactly one of title, project_id or execution_config is required")
+		return
+	}
+	if hasExecutionConfig && !requireHumanChatApprovalConfig(w, r, req.ExecutionConfig, true) {
 		return
 	}
 
@@ -399,6 +449,8 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 			ID:    session.ID,
 			Title: title,
 		})
+	} else if hasExecutionConfig {
+		updated, err = h.updateChatExecutionConfig(r.Context(), session, req.ExecutionConfig)
 	} else {
 		projectID := pgtype.UUID{Valid: false}
 		if string(req.ProjectID) != "null" {
@@ -454,6 +506,10 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 		projectIDChanged = true
 	}
 	if err != nil {
+		if hasExecutionConfig {
+			h.writeChatExecutionConfigError(w, err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to update chat session")
 		return
 	}
@@ -468,9 +524,16 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 		projectID := uuidToPtr(updated.ProjectID)
 		payload.ProjectID = &projectID
 	}
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, payload)
+	var eventPayload any = payload
+	if hasExecutionConfig {
+		eventPayload = struct {
+			protocol.ChatSessionUpdatedPayload
+			ExecutionConfig json.RawMessage `json:"execution_config"`
+		}{payload, chatExecutionConfigJSON(updated.ExecutionConfig)}
+	}
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, eventPayload)
 
-	writeJSON(w, http.StatusOK, chatSessionToResponse(updated))
+	h.writeChatSessionResponse(w, r, http.StatusOK, updated)
 }
 
 type SetChatSessionPinnedRequest struct {
@@ -518,7 +581,7 @@ func (h *Handler) SetChatSessionPinned(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:     timestampToString(updated.UpdatedAt),
 	})
 
-	writeJSON(w, http.StatusOK, chatSessionToResponse(updated))
+	h.writeChatSessionResponse(w, r, http.StatusOK, updated)
 }
 
 type SetChatSessionArchivedRequest struct {
@@ -678,7 +741,7 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 		UpdatedAt:     timestampToString(updated.UpdatedAt),
 	})
 
-	writeJSON(w, http.StatusOK, chatSessionToResponse(updated))
+	h.writeChatSessionResponse(w, r, http.StatusOK, updated)
 }
 
 // DeleteChatSession hard-deletes a chat session owned by the caller. The
@@ -781,6 +844,14 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Session deletion clears historical task links, so sweep native receipts first.
+	if err := qtx.DeleteTaskApprovalsByChatSession(r.Context(), db.DeleteTaskApprovalsByChatSessionParams{
+		ChatSessionID: session.ID, WorkspaceID: session.WorkspaceID,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete native chat task approvals")
+		return
+	}
+
 	if err := qtx.DeleteChatSession(r.Context(), db.DeleteChatSessionParams{
 		ID:          session.ID,
 		WorkspaceID: session.WorkspaceID,
@@ -829,6 +900,8 @@ type SendChatMessageRequest struct {
 
 type SendChatMessageResponse = service.ChatSubmissionResponse
 
+// SendChatMessage checks caller access before the service accepts a send and freezes
+// its execution options in the submission transaction; replay lookups do not enqueue again.
 func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -995,6 +1068,8 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "chat agent is archived")
 		case errors.Is(err, service.ErrChatTaskAgentNoRuntime):
 			writeError(w, http.StatusConflict, "chat agent has no runtime")
+		case errors.Is(err, service.ErrChatExecutionConfigInvalid):
+			writeError(w, http.StatusBadRequest, err.Error())
 		default:
 			slog.Warn("send chat message failed", append(logger.RequestAttrs(r), "error", err)...)
 			writeError(w, http.StatusInternalServerError, "failed to send chat message")
@@ -1956,14 +2031,179 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 
 // Response types & helpers
 
+// patchChatExecutionConfig keeps session validation aligned with agent literal
+// and discovered ACP capability checks without invoking any installed CLI.
+func (h *Handler) patchChatExecutionConfig(ctx context.Context, q *db.Queries, stored, patch []byte, carrier db.Agent) ([]byte, error) {
+	provider := ""
+	if carrier.RuntimeID.Valid {
+		runtime, err := q.GetAgentRuntime(ctx, carrier.RuntimeID)
+		if err != nil {
+			return nil, fmt.Errorf("load chat runtime: %w", err)
+		}
+		provider = runtime.Provider
+	}
+	inherited := service.ExecutionConfig{Model: carrier.Model.String, ThinkingLevel: carrier.ThinkingLevel.String, ServiceTier: carrier.ServiceTier.String}
+	updated, err := service.PatchChatExecutionConfig(stored, patch, inherited, provider)
+	if err != nil {
+		return nil, err
+	}
+	var config service.ChatExecutionConfig
+	if err := json.Unmarshal(updated, &config); err != nil {
+		return nil, err
+	}
+	if config.ThinkingLevel != nil && *config.ThinkingLevel != "" {
+		switch h.acpThinkingDecision(ctx, provider, carrier.RuntimeID) {
+		case acpEffortAbsent:
+			return nil, fmt.Errorf("%w: %s", service.ErrChatExecutionConfigInvalid, thinkingCapabilityRejection(provider))
+		case acpEffortUnknown:
+			return nil, fmt.Errorf("%w: %s", service.ErrChatExecutionConfigInvalid, thinkingCapabilityUnknownRejection(provider))
+		}
+	}
+	return updated, nil
+}
+
+// updateChatExecutionConfig shares send's session -> agent lock order so every
+// accepted turn observes either the old or new configuration, never a mixture.
+func (h *Handler) updateChatExecutionConfig(ctx context.Context, session db.ChatSession, patch []byte) (db.ChatSession, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.ChatSession{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	if _, err := qtx.LockChatSessionForRuntimeBind(ctx, session.ID); err != nil {
+		return db.ChatSession{}, err
+	}
+	current, err := qtx.GetChatSessionInWorkspace(ctx, db.GetChatSessionInWorkspaceParams{ID: session.ID, WorkspaceID: session.WorkspaceID})
+	if err != nil {
+		return db.ChatSession{}, err
+	}
+	if current.Status != "active" {
+		return db.ChatSession{}, service.ErrChatSessionArchived
+	}
+	carrier, err := qtx.GetAgentForClaimUpdate(ctx, current.AgentID)
+	if err != nil {
+		return db.ChatSession{}, err
+	}
+	config, err := h.patchChatExecutionConfig(ctx, qtx, current.ExecutionConfig, patch, carrier)
+	if err != nil {
+		return db.ChatSession{}, err
+	}
+	updated, err := qtx.UpdateChatSessionExecutionConfig(ctx, db.UpdateChatSessionExecutionConfigParams{
+		ID: current.ID, WorkspaceID: current.WorkspaceID, ExecutionConfig: config,
+	})
+	if err != nil {
+		return db.ChatSession{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.ChatSession{}, err
+	}
+	return updated, nil
+}
+
+// writeChatExecutionConfigError distinguishes rejected overrides from storage
+// failures and the existing archived-session conflict.
+func (h *Handler) writeChatExecutionConfigError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrChatExecutionConfigInvalid):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, service.ErrChatSessionArchived):
+		writeError(w, http.StatusConflict, "chat session is archived")
+	default:
+		slog.Warn("update chat execution config failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to store chat execution config")
+	}
+}
+
+// writeChatSessionResponse applies the same metadata contract to create, get,
+// rename, configuration, pin, and archive responses.
+func (h *Handler) writeChatSessionResponse(w http.ResponseWriter, r *http.Request, status int, session db.ChatSession) {
+	responses := []ChatSessionResponse{chatSessionToResponse(session)}
+	if err := h.hydrateChatSessionChannelMetadata(r.Context(), responses); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chat channel metadata")
+		return
+	}
+	if err := h.hydrateChatExecutionConfigs(r.Context(), responses); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chat execution config")
+		return
+	}
+	writeJSON(w, status, responses[0])
+}
+
+// hydrateChatExecutionConfigs resolves response settings in one workspace-
+// scoped query; the per-model catalog, not these category flags, owns choices.
+func (h *Handler) hydrateChatExecutionConfigs(ctx context.Context, sessions []ChatSessionResponse) error {
+	if len(sessions) == 0 {
+		return nil
+	}
+	ids := make([]pgtype.UUID, 0, len(sessions))
+	byID := make(map[string]*ChatSessionResponse, len(sessions))
+	for i := range sessions {
+		ids = append(ids, parseUUID(sessions[i].ID))
+		byID[sessions[i].ID] = &sessions[i]
+	}
+	rows, err := h.Queries.ListChatExecutionConfigs(ctx, db.ListChatExecutionConfigsParams{
+		WorkspaceID: parseUUID(sessions[0].WorkspaceID), Ids: ids,
+	})
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		response := byID[uuidToString(row.ID)]
+		if response == nil {
+			continue
+		}
+		effective, err := service.ResolveChatExecutionConfig(row.ExecutionConfig, service.ExecutionConfig{
+			Model: row.Model, ThinkingLevel: row.ThinkingLevel, ServiceTier: row.ServiceTier,
+		})
+		if err != nil {
+			return err
+		}
+		response.ExecutionConfig = chatExecutionConfigJSON(row.ExecutionConfig)
+		response.EffectiveExecutionConfig = effective
+		response.ExecutionConfigSupported = true
+		response.ExecutionConfigCapabilities = ChatExecutionConfigCapabilities{
+			Model:         row.Provider != "" && agent.ModelSelectionSupported(row.Provider),
+			ThinkingLevel: agent.ThinkingControlSupported(row.Provider) && h.acpThinkingDecision(ctx, row.Provider, row.RuntimeID) == acpEffortPresent,
+			ServiceTier:   row.Provider == "codex", ApprovalPolicy: row.Provider == "codex",
+		}
+	}
+	return nil
+}
+
+// chatExecutionConfigJSON keeps legacy or test-created zero values as an empty
+// override object rather than a nullable response field.
+func chatExecutionConfigJSON(raw []byte) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage("{}")
+	}
+	return json.RawMessage(raw)
+}
+
+// ChatExecutionConfigCapabilities marks provider-level API controls, not native
+// approval readiness on any platform. Launch must reject unsupported approval
+// modes; installed-model choices remain runtime-catalog owned.
+type ChatExecutionConfigCapabilities struct {
+	Model          bool `json:"model"`
+	ThinkingLevel  bool `json:"thinking_level"`
+	ServiceTier    bool `json:"service_tier"`
+	ApprovalPolicy bool `json:"approval_policy"`
+}
+
+// ChatSessionResponse exposes current inherited settings for editing. Tasks
+// execute from their own frozen Context, never from this live projection.
 type ChatSessionResponse struct {
-	ID          string  `json:"id"`
-	WorkspaceID string  `json:"workspace_id"`
-	AgentID     string  `json:"agent_id"`
-	CreatorID   string  `json:"creator_id"`
-	ProjectID   *string `json:"project_id"`
-	Title       string  `json:"title"`
-	Status      string  `json:"status"`
+	ExecutionConfig             json.RawMessage                 `json:"execution_config"`
+	EffectiveExecutionConfig    service.ExecutionConfig         `json:"effective_execution_config"`
+	ExecutionConfigSupported    bool                            `json:"execution_config_supported"`
+	ExecutionConfigCapabilities ChatExecutionConfigCapabilities `json:"execution_config_capabilities"`
+	ID                          string                          `json:"id"`
+	WorkspaceID                 string                          `json:"workspace_id"`
+	AgentID                     string                          `json:"agent_id"`
+	CreatorID                   string                          `json:"creator_id"`
+	ProjectID                   *string                         `json:"project_id"`
+	Title                       string                          `json:"title"`
+	Status                      string                          `json:"status"`
 	// Only populated by list endpoints — single-session fetches return 0/false/nil.
 	// HasUnread is kept as a convenience (== UnreadCount > 0) for existing consumers.
 	HasUnread   bool             `json:"has_unread"`
@@ -2074,16 +2314,18 @@ type ChatMessageResponse struct {
 
 func chatSessionToResponse(s db.ChatSession) ChatSessionResponse {
 	return ChatSessionResponse{
-		ID:          uuidToString(s.ID),
-		WorkspaceID: uuidToString(s.WorkspaceID),
-		AgentID:     uuidToString(s.AgentID),
-		CreatorID:   uuidToString(s.CreatorID),
-		ProjectID:   uuidToPtr(s.ProjectID),
-		Title:       s.Title,
-		Status:      s.Status,
-		Pinned:      s.PinnedAt.Valid,
-		CreatedAt:   timestampToString(s.CreatedAt),
-		UpdatedAt:   timestampToString(s.UpdatedAt),
+		ExecutionConfig:          chatExecutionConfigJSON(s.ExecutionConfig),
+		ExecutionConfigSupported: true,
+		ID:                       uuidToString(s.ID),
+		WorkspaceID:              uuidToString(s.WorkspaceID),
+		AgentID:                  uuidToString(s.AgentID),
+		CreatorID:                uuidToString(s.CreatorID),
+		ProjectID:                uuidToPtr(s.ProjectID),
+		Title:                    s.Title,
+		Status:                   s.Status,
+		Pinned:                   s.PinnedAt.Valid,
+		CreatedAt:                timestampToString(s.CreatedAt),
+		UpdatedAt:                timestampToString(s.UpdatedAt),
 	}
 }
 

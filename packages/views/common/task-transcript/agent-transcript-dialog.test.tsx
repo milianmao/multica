@@ -2,6 +2,8 @@
 
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { issueKeys } from "@multica/core/issues/queries";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { api } from "@multica/core/api";
@@ -23,6 +25,7 @@ vi.mock("@multica/core/api", () => ({
   api: {
     getAgent: vi.fn().mockResolvedValue(null),
     listRuntimes: vi.fn().mockResolvedValue([]),
+    listTimeline: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -51,10 +54,11 @@ vi.mock("react-virtuoso", () => ({
 }));
 
 // The receipt button fetches through React Query and has its own tests
-// (context-receipt.test.tsx); this suite renders the dialog without a client.
+// (context-receipt.test.tsx); it is independent of the transcript rows here.
 vi.mock("./context-receipt", () => ({
   ContextReceiptButton: () => null,
 }));
+vi.mock("../task-approval/task-approval-cards", () => ({ TaskApprovalCards: () => null }));
 
 vi.mock("../actor-avatar", () => ({
   ActorAvatar: () => <span data-testid="actor-avatar" />,
@@ -219,6 +223,13 @@ const items: TimelineItem[] = [
   },
 ];
 
+function withClient(children: ReactNode) {
+  // Query-cache eviction is not one of the component-owned timers asserted below.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } });
+  client.setQueryData(issueKeys.timeline(baseTask.issue_id), []);
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
 function renderDialog(
   dialogItems: TimelineItem[] = items,
   options: {
@@ -227,7 +238,7 @@ function renderDialog(
     locale?: SupportedLocale;
   } = {},
 ) {
-  return renderWithI18n(
+  const result = renderWithI18n(withClient(
     <AgentTranscriptDialog
       open
       onOpenChange={vi.fn()}
@@ -235,9 +246,11 @@ function renderDialog(
       items={dialogItems}
       agentName="Codex"
       isLive={options.isLive}
-    />,
+    />),
     { locale: options.locale },
   );
+  fireEvent.click(screen.getByRole("button", { pressed: false }));
+  return result;
 }
 
 beforeEach(() => {
@@ -437,7 +450,7 @@ describe("AgentTranscriptDialog", () => {
   // element was the one value that never changes. Identity belongs to the run,
   // and the header already carries it.
   it("states the agent once in the header, not on every prose row", () => {
-    renderWithI18n(
+    renderWithI18n(withClient(
       <AgentTranscriptDialog
         open
         onOpenChange={vi.fn()}
@@ -449,7 +462,7 @@ describe("AgentTranscriptDialog", () => {
         ]}
         agentName="【Chores|Opus5】Multica Helper"
       />,
-    );
+    ));
 
     expect(screen.getAllByTestId("rich-content")).toHaveLength(3);
     expect(screen.getAllByText("【Chores|Opus5】Multica Helper")).toHaveLength(1);

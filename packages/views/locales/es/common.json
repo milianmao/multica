@@ -135,5 +135,37 @@
     "unknown": "Este servidor no ha confirmado sus ajustes de conexión. Pide a tu administrador que actualice el servidor.",
     "incomplete": "Los ajustes de conexión están incompletos. Pide a tu administrador que configure las URL públicas de este servidor."
   },
-  "more_actions": "Más acciones"
+  "more_actions": "Más acciones",
+  "task_approvals": {
+    "title": "Aprobaciones nativas",
+    "kind": {
+      "command": "Comando",
+      "file_change": "Cambios en archivos",
+      "permissions": "Permisos",
+      "unsupported": "Solicitud no compatible"
+    },
+    "status": {
+      "pending": "Esperando aprobación humana",
+      "decided": "Decisión tomada · esperando a que continúe la ejecución",
+      "processed": "Procesada",
+      "expired": "Caducada"
+    },
+    "decision": {
+      "approve": "Aprobado una vez",
+      "deny": "Denegado"
+    },
+    "approve": "Aprobar una vez",
+    "deny": "Denegar",
+    "submitting": "Enviando decisión…",
+    "read_only": "Solo las personas autorizadas pueden decidir.",
+    "command": "Comando",
+    "cwd": "Directorio de trabajo",
+    "changes": "Cambios en archivos",
+    "permissions": "Alcance de los permisos",
+    "details": "Detalles de la solicitud",
+    "load_failed": "No se pudieron cargar las aprobaciones.",
+    "decision_failed": "No se pudo enviar la decisión.",
+    "unavailable": "Las aprobaciones nativas no están disponibles para esta ejecución.",
+    "retry": "Reintentar"
+  }
 }

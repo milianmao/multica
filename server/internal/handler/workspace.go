@@ -1138,6 +1138,7 @@ func lockWorkspaceTaskOwners(ctx context.Context, qtx *db.Queries, workspaceID p
 	return nil
 }
 
+// DeleteWorkspace removes workspace-owned database rows in one teardown transaction.
 func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	workspaceID := workspaceIDFromURL(r, "id")
 
@@ -1300,6 +1301,11 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			// data statement and the separate whole-workspace task delete.
 			name: "delete tasks",
 			run:  func() error { return deleteWorkspaceTasks(ctx, qtx, requester.WorkspaceID) },
+		},
+		{
+			// Tasks have already been deleted under their row locks; these receipts have no FK cleanup.
+			name: "delete native task approvals",
+			run:  func() error { return qtx.DeleteTaskApprovalsByWorkspace(ctx, requester.WorkspaceID) },
 		},
 		{
 			name: "delete Qoder Cloud Agents connection",

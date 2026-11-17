@@ -135,5 +135,37 @@
   },
   "navigation": {
     "open_in_new_tab": "Ouvrir dans un nouvel onglet"
+  },
+  "task_approvals": {
+    "title": "Approbations natives",
+    "kind": {
+      "command": "Commande",
+      "file_change": "Modifications de fichiers",
+      "permissions": "Permissions",
+      "unsupported": "Demande non prise en charge"
+    },
+    "status": {
+      "pending": "En attente d’une approbation humaine",
+      "decided": "Décision prise · en attente de la reprise de l’exécution",
+      "processed": "Traitée",
+      "expired": "Expirée"
+    },
+    "decision": {
+      "approve": "Approuvé une fois",
+      "deny": "Refusé"
+    },
+    "approve": "Approuver une fois",
+    "deny": "Refuser",
+    "submitting": "Envoi de la décision…",
+    "read_only": "Seules les personnes autorisées peuvent décider.",
+    "command": "Commande",
+    "cwd": "Répertoire de travail",
+    "changes": "Modifications de fichiers",
+    "permissions": "Portée des permissions",
+    "details": "Détails de la demande",
+    "load_failed": "Impossible de charger les approbations.",
+    "decision_failed": "Impossible d’envoyer la décision.",
+    "unavailable": "Les approbations natives ne sont pas disponibles pour cette exécution.",
+    "retry": "Réessayer"
   }
 }

@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { useCreateComment, useRetryTaskSupplement } from "@multica/core/issues/mutations";
 import { api } from "@multica/core/api";
 import { issueKeys, issueTasksOptions } from "@multica/core/issues/queries";
-import { commentSupplementReceipts, isSupplementInFlight } from "@multica/core/issues/run-steering";
+import { commentSupplementReceipts, isSteerableTask, isSupplementInFlight } from "@multica/core/issues/run-steering";
 import type { AgentTask, CommentSupplementReceipt, TimelineEntry } from "@multica/core/types";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { Button } from "@multica/ui/components/ui/button";
@@ -75,23 +75,29 @@ function BadgeLegacyName({ issueId, receipt }: { issueId: string; receipt: Comme
   return <>{t(($) => $.inline_run.steer_badge, { names: name })}</>;
 }
 
-/** One line per running turn the message steered, following its delivery. */
-export function SteerReceipts({ issueId, entry }: { issueId: string; entry: TimelineEntry }) {
+/** Issue threads may resend; run-bound surfaces retry only the original steerable task. */
+export function SteerReceipts({ issueId, entry, allowResend = true }: {
+  issueId: string;
+  entry: TimelineEntry;
+  allowResend?: boolean;
+}) {
   const receipts = commentSupplementReceipts(entry);
   if (receipts.length === 0) return null;
   return (
     <div className="mt-1.5 flex flex-col gap-1">
       {receipts.map((receipt) => (
-        <SteerReceipt key={receipt.task_id} issueId={issueId} entry={entry} receipt={receipt} />
+        <SteerReceipt key={receipt.task_id} issueId={issueId} entry={entry} receipt={receipt} allowResend={allowResend} />
       ))}
     </div>
   );
 }
 
-function SteerReceipt({ issueId, entry, receipt }: {
+/** A receipt keeps its task identity even when the agent starts a later run. */
+function SteerReceipt({ issueId, entry, receipt, allowResend }: {
   issueId: string;
   entry: TimelineEntry;
   receipt: CommentSupplementReceipt;
+  allowResend: boolean;
 }) {
   const { t } = useT("issues");
   const { name, task } = useReceiptAgentName(issueId, receipt);
@@ -155,7 +161,8 @@ function SteerReceipt({ issueId, entry, receipt }: {
         : reasonCode === "timeout"
           ? t(($) => $.inline_run.supplement_failure_timeout)
           : t(($) => $.inline_run.supplement_failure_unknown);
-  const canRetry = !terminal && reasonCode !== "turn_ended";
+  const canRetry = !terminal && reasonCode !== "turn_ended"
+    && (allowResend || (!!task && isSteerableTask(task)));
   return (
     <div role="alert" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-destructive">
       <span className="inline-flex items-center gap-1.5">
@@ -171,7 +178,7 @@ function SteerReceipt({ issueId, entry, receipt }: {
           {t(($) => $.inline_run.supplement_retry)}
         </Button>
       )}
-      {!resent && (
+      {allowResend && !resent && (
         <Button type="button" size="xs" variant="outline" className="text-foreground" disabled={resending || resend.isPending}
           onClick={() => void resendToAgent()}>
           {resending || resend.isPending ? <Loader2 className="size-3 motion-safe:animate-spin" /> : <CornerDownRight className="size-3" />}

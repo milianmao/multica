@@ -888,6 +888,15 @@
     "failed_indicator": "Failed"
   },
   "transcript": {
+    "conversation": "Conversation",
+    "execution_log": "Execution log",
+    "final_reply": "Final reply",
+    "guidance_label": "Add guidance to this run",
+    "guidance_send": "Send guidance",
+    "guidance_failed": "Could not send guidance. Your text was kept.",
+    "guidance_shared": "Visible in the issue thread.",
+    "guidance_unavailable": "This run cannot receive additional guidance.",
+    "guidance_ended": "This run has ended.",
     "dialog_title": "Agent Execution Transcript",
     "status_running": "Running",
     "status_completed": "Completed",

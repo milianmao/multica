@@ -39,10 +39,30 @@ const LAUNCHER_ENV_NAMES = new Set([
  * the dev checkout, and NODE_ENV=development breaks Next.js and Vite
  * production builds. NODE_ENV_ELECTRON_VITE marks that launch, so the launcher
  * env is dropped only when it is present. A packaged app is not launched this
- * way, so its env reaches the daemon untouched.
+ * way, so its env is preserved. An explicit Local API bypass leaves model
+ * proxies intact and limits direct access to that API host and port.
  */
-export function daemonSpawnEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function daemonSpawnEnv(
+  env: NodeJS.ProcessEnv,
+  directApiUrl?: string | null,
+): NodeJS.ProcessEnv {
   const spawnEnv: NodeJS.ProcessEnv = { ...env, MULTICA_LAUNCHED_BY: "desktop" };
+  if (directApiUrl) {
+    const apiUrl = new URL(directApiUrl);
+    if (apiUrl.protocol !== "http:" && apiUrl.protocol !== "https:") {
+      throw new Error("Daemon API URL must use HTTP or HTTPS");
+    }
+    const port = apiUrl.port || (apiUrl.protocol === "https:" ? "443" : "80");
+    // Windows de-duplicates env names, so merge every existing spelling first.
+    const bypass = Object.entries(spawnEnv)
+      .filter(([name]) => name.toUpperCase() === "NO_PROXY")
+      .map(([, value]) => value)
+      .concat(`${apiUrl.hostname}:${port}`)
+      .filter(Boolean)
+      .join(",");
+    spawnEnv.NO_PROXY = bypass;
+    spawnEnv.no_proxy = bypass;
+  }
   if (spawnEnv.NODE_ENV_ELECTRON_VITE === undefined) return spawnEnv;
 
   const scriptDir = spawnEnv.PNPM_SCRIPT_SRC_DIR;

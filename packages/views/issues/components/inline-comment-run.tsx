@@ -57,16 +57,27 @@ export function useInlineCommentRunState() {
 
 export type InlineCommentRunState = ReturnType<typeof useInlineCommentRunState>;
 
+/** Keeps full-log ownership outside activity rows that can be regrouped or unmounted. */
+export interface InlineCommentRunTranscriptControl {
+  /** Selected task identity shared by every placement of its log trigger. */
+  taskId: string | null;
+  /** Opens the stable host with the trigger's keyboard focus-return semantics. */
+  onOpen(taskId: string, fromKeyboard: boolean): void;
+}
+
 export function PlacedInlineCommentRun({ presentation = "inline", ...props }: Parameters<typeof InlineCommentRun>[0]) {
   // A live reply compacts its run into the comment header.
   if ((presentation === "header") !== showCommentRunInHeader(props.run)) return null;
   return <InlineCommentRun {...props} presentation={presentation} />;
 }
 
-export function InlineCommentRun({ run, className, viewState, showIdentity = false, presentation = "inline", replyTo, replacesFailureNotice = false }: {
+/** Delegates full logs to the issue host while keeping row disclosures local. */
+export function InlineCommentRun({ run, className, viewState, transcriptControl, showIdentity = false, presentation = "inline", replyTo, replacesFailureNotice = false }: {
   run: CommentRun;
   className?: string;
   viewState?: InlineCommentRunState;
+  /** Issue activity owns the dialog; other surfaces retain their local entry point. */
+  transcriptControl?: InlineCommentRunTranscriptControl;
   showIdentity?: boolean;
   presentation?: "inline" | "header";
   /** The input this run answers, under its identity like a reply's. */
@@ -94,7 +105,13 @@ export function InlineCommentRun({ run, className, viewState, showIdentity = fal
   const active = isActiveCommentRun(task);
   const localViewState = useInlineCommentRunState();
   const state = viewState ?? localViewState;
-  const { expanded, setExpanded, fullLogOpen, setFullLogOpen, openFullLog, logFromKeyboard } = state;
+  const { expanded, setExpanded, setFullLogOpen, logFromKeyboard } = state;
+  const fullLogOpen = transcriptControl ? transcriptControl.taskId === task.id : state.fullLogOpen;
+  /** A hosted open must not set disposable row state or mount a second dialog. */
+  const openFullLog = (event: React.MouseEvent<HTMLElement>) => {
+    if (transcriptControl) transcriptControl.onOpen(task.id, event.detail === 0);
+    else state.openFullLog(event);
+  };
   const [confirmStop, setConfirmStop] = useState(false);
   const [now, setNow] = useState(Date.now);
   const [visibleCount, setVisibleCount] = useState(12);
@@ -104,7 +121,7 @@ export function InlineCommentRun({ run, className, viewState, showIdentity = fal
   const regionId = useId();
   // Keep one disclosure button mounted across queued, live, and historical states.
   // Historical, collapsed runs still don't fetch transcripts.
-  const loadTranscript = task.status === "running" || (presentation === "inline" && expanded) || fullLogOpen;
+  const loadTranscript = task.status === "running" || (presentation === "inline" && expanded) || (!transcriptControl && fullLogOpen);
   const { data, isPending, isError, refetch } = useTaskMessages(task.id, active, loadTranscript);
   const items = useMemo(() => buildTimeline(data ?? []), [data]);
   const formatText = useTraceIssueLabels(useWorkspaceId(), task.issue_id, items, loadTranscript);
@@ -144,8 +161,9 @@ export function InlineCommentRun({ run, className, viewState, showIdentity = fal
   const activityLabel = t(($) => $.inline_run.view_activity);
   const stepLabel = steps.length > 0 ? t(($) => $.inline_run.steps, { count: steps.length }) : "";
   const stopLabel = cancel.isPending || cancel.isSuccess ? t(($) => $.inline_run.stopping) : t(($) => $.inline_run.stop);
-  const transcript = fullLogOpen && <AgentTranscriptDialog open onOpenChange={setFullLogOpen}
+  const transcript = !transcriptControl && fullLogOpen && <AgentTranscriptDialog open onOpenChange={setFullLogOpen}
     task={task} items={items} agentName={name} isLive={active} finalFocus={logFromKeyboard}
+    parentId={run.anchorCommentId ?? task.trigger_comment_id}
     contentState={isPending ? <p role="status" className="text-body text-muted-foreground">{t(($) => $.inline_run.loading)}</p>
       : isError ? <div role="alert" className="text-body text-destructive">{t(($) => $.inline_run.load_failed)}
         <button className="ml-2 underline" type="button" onClick={() => void refetch()}>{t(($) => $.inline_run.try_again)}</button>

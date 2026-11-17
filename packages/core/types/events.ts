@@ -1,6 +1,7 @@
 import type { Issue, IssueMetadata, IssueReaction } from "./issue";
 import type { IssueProperty, IssuePropertyValues } from "./property";
 import type { Agent } from "./agent";
+import type { ChatExecutionConfig, ChatExecutionConfigCapabilities, ChatEffectiveExecutionConfig } from "./chat";
 import type { InboxItem } from "./inbox";
 import type { Comment, Reaction } from "./comment";
 import type { TimelineEntry } from "./activity";
@@ -612,6 +613,21 @@ export interface InvitationRevokedPayload {
   invitee_email: string;
 }
 
+/** Partial session updates preserve omitted fields; null resets config inheritance. */
+export interface ChatSessionUpdatedPayload {
+  chat_session_id: string;
+  workspace_id?: string;
+  title?: string;
+  project_id?: string | null;
+  pinned?: boolean;
+  status?: "active" | "archived";
+  updated_at?: string;
+  execution_config?: ChatExecutionConfig | null;
+  effective_execution_config?: ChatEffectiveExecutionConfig;
+  execution_config_supported?: boolean;
+  execution_config_capabilities?: ChatExecutionConfigCapabilities;
+}
+
 export interface ChatSessionCreatedPayload {
   workspace_id: string;
   chat_session_id: string;
@@ -701,7 +717,7 @@ export interface WSEventPayloadMap {
   "chat:session_created": ChatSessionCreatedPayload;
   "chat:session_read": ChatSessionReadPayload;
   "chat:session_deleted": ChatSessionDeletedPayload;
-  "chat:session_updated": unknown;
+  "chat:session_updated": ChatSessionUpdatedPayload;
   "project:created": ProjectCreatedPayload;
   "project:updated": ProjectUpdatedPayload;
   "project:deleted": ProjectDeletedPayload;

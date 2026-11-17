@@ -46,6 +46,9 @@ var codexModelsCacheConfigFiles = []string{
 // CodexHomeOptions carries optional inputs for prepareCodexHomeWithOpts that
 // affect the generated per-task config.toml.
 type CodexHomeOptions struct {
+	// ApprovalPolicy selects per-execution sandbox behavior; empty retains the
+	// historical platform policy. On-request must never use its full-access fallback.
+	ApprovalPolicy string
 	// CodexVersion is the detected Codex CLI version (e.g. "0.121.0"). Empty
 	// means unknown; on macOS, unknown is treated as "probably broken" so the
 	// daemon falls back to danger-full-access for network access. See
@@ -285,7 +288,10 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	if resolveGOOS(opts.GOOS) == "windows" {
 		winState = resolveWindowsSandboxState(configFile, configSyncErr, statSharedCodexConfig(sharedHome), opts.CodexCustomArgs, logger)
 	}
-	policy := codexSandboxPolicyForConfig(opts.GOOS, opts.CodexVersion, winState)
+	policy, err := codexSandboxPolicyForApproval(opts.GOOS, opts.CodexVersion, winState, opts.ApprovalPolicy)
+	if err != nil {
+		return fmt.Errorf("configure codex approval sandbox: %w", err)
+	}
 	if err := ensureCodexSandboxConfig(configFile, policy, opts.CodexVersion, logger); err != nil {
 		// The managed block is the authoritative on-disk sandbox policy. If it
 		// can't be written, config.toml keeps whatever it already had — on a
@@ -316,6 +322,28 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	}
 
 	return nil
+}
+
+// ApplyCodexApprovalPolicy is the daemon integration point after Prepare/Reuse.
+// It only rewrites the task-local managed sandbox block; the backend separately
+// verifies native readiness and the effective thread policy before turn/start.
+func ApplyCodexApprovalPolicy(codexHome string, opts CodexHomeOptions, logger *slog.Logger) error {
+	if opts.ApprovalPolicy == "" {
+		return nil
+	}
+	if codexHome == "" || sameCodexPath(codexHome, resolveSharedCodexHome()) {
+		return fmt.Errorf("codex approval sandbox requires a task-local CODEX_HOME")
+	}
+	configFile := filepath.Join(codexHome, "config.toml")
+	winState := windowsSandboxAbsent
+	if resolveGOOS(opts.GOOS) == "windows" {
+		winState = resolveWindowsSandboxState(configFile, nil, sharedConfigAbsent, opts.CodexCustomArgs, logger)
+	}
+	policy, err := codexSandboxPolicyForApproval(opts.GOOS, opts.CodexVersion, winState, opts.ApprovalPolicy)
+	if err != nil {
+		return err
+	}
+	return ensureCodexSandboxConfig(configFile, policy, opts.CodexVersion, logger)
 }
 
 // resolveSharedCodexHome returns the path to the user's shared Codex home.

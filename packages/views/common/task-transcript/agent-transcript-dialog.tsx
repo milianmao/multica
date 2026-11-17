@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, forwardRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useTraceIssueLabels } from "./use-trace-issue-labels";
 import { Virtuoso, type VirtuosoHandle, type Components } from "react-virtuoso";
@@ -48,6 +49,7 @@ import { plainTriggerSummary, useFormatSpend } from "../../issues/components/tas
 import { cancellationActorLabel, cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { RichContent } from "../../rich-content";
 import { api } from "@multica/core/api";
+import { issueTimelineOptions } from "@multica/core/issues/queries";
 import {
   useTranscriptViewStore,
   type TranscriptFilterKey,
@@ -63,7 +65,7 @@ import {
   FOLLOW_EDGE_THRESHOLD,
   LINE_SCROLL_PX,
 } from "./transcript-follow";
-import { isOutputTruncated, type TimelineItem } from "./build-timeline";
+import { isOutputTruncated, splitTimelineItemsAt, type TimelineItem } from "./build-timeline";
 import {
   buildLanes,
   buildSteps,
@@ -81,6 +83,9 @@ import {
 import { buildRunOutcome } from "./run-outcome";
 import { RunTimeline } from "./run-timeline";
 import { ContextReceiptButton } from "./context-receipt";
+import { buildConversationMessages, isConversationMessageRow, mergeConversationRows, type ConversationRow } from "./conversation-timeline";
+import { ConversationMessage, TranscriptRunControls } from "./conversation";
+import { TaskApprovalCards } from "../task-approval/task-approval-cards";
 import {
   base64ByteLength,
   readImageResult,
@@ -110,10 +115,7 @@ import "../../editor/styles/code.css";
 import "./task-transcript.css";
 import { TooltipHint } from "@multica/ui/components/common/tooltip-hint";
 
-// The run surface, read in four layers: what happened (header), what it
-// produced (outcome), where the time went (timeline), and the evidence (steps).
-// Only one layer is expanded at a time — the inspector opens on demand rather
-// than splitting the surface in two before the reader has asked anything.
+// Conversation and execution evidence share the same redacted step model.
 
 interface AgentTranscriptDialogProps {
   open: boolean;
@@ -122,6 +124,8 @@ interface AgentTranscriptDialogProps {
   items: TimelineItem[];
   agentName: string;
   isLive?: boolean;
+  /** The visible issue thread this run answers; never infer it from progress. */
+  parentId?: string;
   /**
    * Whether focus returns to the trigger when the dialog closes. Pass `true`
    * only for a keyboard open, where the reader has no other way back. After a
@@ -284,7 +288,14 @@ const VirtuosoList = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElem
     return <div ref={ref} {...props} className="divide-y" />;
   },
 );
-const LIST_COMPONENTS: Components<TraceRow> = { List: VirtuosoList };
+interface TranscriptListContext {
+  footer: React.ReactNode;
+}
+
+const LIST_COMPONENTS: Components<ConversationRow, TranscriptListContext> = {
+  List: VirtuosoList,
+  Footer: ({ context }) => <>{context?.footer}</>,
+};
 const COPY_FEEDBACK_DURATION_MS = 2000;
 
 function useCopyFeedback() {
@@ -316,6 +327,7 @@ function useCopyFeedback() {
   return [copied, showCopied] as const;
 }
 
+/** Keep prose readable by default without losing the log's filtering and live follow. */
 export function AgentTranscriptDialog({
   open,
   onOpenChange,
@@ -323,6 +335,7 @@ export function AgentTranscriptDialog({
   items,
   agentName,
   isLive = false,
+  parentId,
   finalFocus = false,
   headerSlot,
   contentState,
@@ -330,7 +343,16 @@ export function AgentTranscriptDialog({
   const { t } = useT("agents");
   const formatSpend = useFormatSpend();
   const locale = useLocale();
-  const formatText = useTraceIssueLabels(useWorkspaceId(), task.issue_id, items, open);
+  const wsId = useWorkspaceId();
+  const formatText = useTraceIssueLabels(wsId, task.issue_id, items, open);
+  const [view, setView] = useState<"conversation" | "log">("conversation");
+  const isConversation = view === "conversation";
+  const { data: issueTimeline = [] } = useQuery({
+    ...issueTimelineOptions(task.issue_id),
+    enabled: open && !!task.issue_id,
+  });
+  const conversationMessages = useMemo(() => buildConversationMessages(task, issueTimeline), [task, issueTimeline]);
+  const hasConversationMessages = isConversation && conversationMessages.length > 0;
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const [query, setQuery] = useState("");
@@ -344,7 +366,8 @@ export function AgentTranscriptDialog({
     () => resolveWorkdirCopyTarget([task]),
     [task],
   );
-  const sortDirection = useTranscriptViewStore((s) => s.sortDirection);
+  const logSortDirection = useTranscriptViewStore((s) => s.sortDirection);
+  const sortDirection = isConversation ? "chronological" : logSortDirection;
   const setSortDirection = useTranscriptViewStore((s) => s.setSortDirection);
   // Filters always persist across opens — a facet a run doesn't have simply
   // no-ops (see activeFilterKeys), so there is no reason to make persistence a
@@ -471,13 +494,17 @@ export function AgentTranscriptDialog({
   useEffect(() => {
     setSelectedSeq(null);
     setExpandedGroups(new Set());
-  }, [task.id]);
+    if (open) setView("conversation");
+  }, [task.id, open]);
 
   // ── Derived model ────────────────────────────────────────────────────────
 
   // One step per tool call, with its result folded in — see build-steps.ts for
   // why the pairing is positional.
-  const steps = useMemo(() => buildSteps(items), [items]);
+  const visibleItems = useMemo(() => isConversation
+    ? splitTimelineItemsAt(items, conversationMessages.map((message) => message.startedAt)) : items,
+  [isConversation, items, conversationMessages]);
+  const steps = useMemo(() => buildSteps(visibleItems), [visibleItems]);
 
   // A facet reads as what its rows look like: the glyph the rows carry, and the
   // name the rows print. The first step of a kind stands in for the glyph. The
@@ -505,13 +532,13 @@ export function AgentTranscriptDialog({
   );
 
   const activeFilterKeys = useMemo(
-    () => selectedFilterKeys.filter((key) => filterOptionKeys.has(key)),
-    [selectedFilterKeys, filterOptionKeys],
+    () => isConversation ? [] : selectedFilterKeys.filter((key) => filterOptionKeys.has(key)),
+    [isConversation, selectedFilterKeys, filterOptionKeys],
   );
 
   const activeFilterSet = useMemo(() => new Set(activeFilterKeys), [activeFilterKeys]);
 
-  const trimmedQuery = query.trim().toLowerCase();
+  const trimmedQuery = isConversation ? "" : query.trim().toLowerCase();
 
   const filteredSteps = useMemo(() => {
     if (activeFilterSet.size === 0 && trimmedQuery.length === 0) return steps;
@@ -527,7 +554,9 @@ export function AgentTranscriptDialog({
 
   // Grouping runs on what the reader is looking at: filtering breaks adjacency,
   // and a group that spans a hidden step would be a lie about what ran.
-  const rows = useMemo(() => groupSteps(filteredSteps), [filteredSteps]);
+  const rows = useMemo(() => isConversation
+    ? mergeConversationRows(filteredSteps, conversationMessages) : groupSteps(filteredSteps),
+  [isConversation, filteredSteps, conversationMessages]);
 
   // Apply user-chosen sort direction. Reverse is a pure presentation concern —
   // the underlying steps (and their seq numbers) are untouched.
@@ -572,7 +601,7 @@ export function AgentTranscriptDialog({
   // instance (fresh at top) instead of letting firstItemIndex climb.
   const firstItemIndex =
     sortDirection === "newest_first" ? 1_000_000 - displayRows.length : 0;
-  const listEpoch = `${task.id}:${sortDirection}:${activeFilterKeys.join(",")}:${trimmedQuery}`;
+  const listEpoch = `${task.id}:${view}:${sortDirection}:${activeFilterKeys.join(",")}:${trimmedQuery}`;
 
   const handleSortDirectionChange = useCallback(
     (dir: TranscriptSortDirection) => {
@@ -639,7 +668,8 @@ export function AgentTranscriptDialog({
 
   const scrollToStep = useCallback(
     (seq: number) => {
-      const index = displayRows.findIndex((row) => row.seq === seq || rowCalls(row).some((c) => c.seq === seq));
+      const index = displayRows.findIndex((row) => !isConversationMessageRow(row)
+        && (row.seq === seq || rowCalls(row).some((c) => c.seq === seq)));
       if (index < 0) return;
       // Explicit navigation away from the live end unlatches the newest-first
       // follow — otherwise the scroll-event enforcement would pin the viewport
@@ -692,6 +722,8 @@ export function AgentTranscriptDialog({
     // call followed by its result, which is the order it happened in.
     const events: TimelineItem[] = [];
     for (const row of displayRows) {
+      // Copy is a log-menu action; published conversation rows are not daemon events.
+      if (isConversationMessageRow(row)) continue;
       if (row.kind === "group") {
         for (const call of row.steps) {
           if (call.call) events.push(call.call);
@@ -871,7 +903,7 @@ export function AgentTranscriptDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="!max-w-5xl !w-[calc(100vw-4rem)] !max-h-[calc(100vh-4rem)] !h-[calc(100vh-4rem)] flex flex-col !p-0 !gap-0 overflow-hidden"
+        className="!max-w-5xl !w-[calc(100%-4rem)] !max-h-[calc(100%-4rem)] !h-[calc(100%-4rem)] flex flex-col !p-0 !gap-0 overflow-hidden"
         showCloseButton={false}
         finalFocus={finalFocus}
       >
@@ -1102,11 +1134,22 @@ export function AgentTranscriptDialog({
         {/* ── What was asked ─────────────────────────────────────────── */}
         <RunTriggerRow task={task} />
 
+        <div role="group" aria-label={t(($) => $.transcript.dialog_title)} className="flex shrink-0 gap-1 border-b px-4 py-2">
+          <Button type="button" size="sm" variant={isConversation ? "secondary" : "ghost"}
+            aria-pressed={isConversation} onClick={() => { setView("conversation"); setSelectedSeq(null); }}>
+            {t(($) => $.transcript.conversation)}
+          </Button>
+          <Button type="button" size="sm" variant={!isConversation ? "secondary" : "ghost"}
+            aria-pressed={!isConversation} onClick={() => { setView("log"); setSelectedSeq(null); }}>
+            {t(($) => $.transcript.execution_log)}
+          </Button>
+        </div>
+
         {/* ── What the run produced ──────────────────────────────────── */}
-        <RunOutcomeRow outcome={outcome} branch={task.branch_name} />
+        {!isConversation && <RunOutcomeRow outcome={outcome} branch={task.branch_name} />}
 
         {/* ── Where the time went ────────────────────────────────────── */}
-        {lanes && (
+        {!isConversation && lanes && (
           <RunTimeline
             lanes={lanes}
             toolKinds={toolKinds}
@@ -1123,7 +1166,7 @@ export function AgentTranscriptDialog({
         )}
 
         {/* ── List toolbar: search left, the two menus right ── */}
-        <div className="flex items-center gap-2 border-b px-4 py-1.5 shrink-0">
+        {!isConversation && <div className="flex items-center gap-2 border-b px-4 py-1.5 shrink-0">
           <label className="flex h-7 min-w-0 max-w-xs flex-1 items-center gap-1.5 rounded-md bg-muted px-2 text-caption">
             <Search aria-hidden className="h-3 w-3 shrink-0 text-faint-foreground" />
             <input
@@ -1228,12 +1271,12 @@ export function AgentTranscriptDialog({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
+        </div>}
 
         {/* ── Steps, and the inspector when one is selected ───────────── */}
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
-            {contentState ? <div className="flex h-full items-center justify-center p-4">{contentState}</div> : displayRows.length === 0 ? (
+            {contentState && !hasConversationMessages ? <div className="flex h-full items-center justify-center p-4">{contentState}</div> : displayRows.length === 0 ? (
               <div className="flex h-full items-center justify-center text-body text-muted-foreground">
                 {isLive && steps.length === 0 ? (
                   <div className="flex items-center gap-2">
@@ -1270,9 +1313,12 @@ export function AgentTranscriptDialog({
                 atTopThreshold={FOLLOW_EDGE_THRESHOLD}
                 atTopStateChange={(atTop) => followCtl.onAtEdgeChange(atTop)}
                 scrollerRef={handleScrollerRef}
-                computeItemKey={(_, row) => row.seq}
+                computeItemKey={(_, row) => isConversationMessageRow(row) ? row.id : row.seq}
                 components={LIST_COMPONENTS}
-                itemContent={(_, row) => (
+                context={{ footer: hasConversationMessages && contentState
+                  ? <div className="px-4 py-3">{contentState}</div> : null }}
+                itemContent={(_, row) => isConversationMessageRow(row)
+                  ? <ConversationMessage issueId={task.issue_id} message={row} /> : (
                   <TranscriptRow
                     row={row}
                     formatText={formatText}
@@ -1294,6 +1340,10 @@ export function AgentTranscriptDialog({
               onClose={() => setSelectedSeq(null)}
             />
           )}
+        </div>
+        <div className="max-h-[35vh] shrink-0 space-y-3 overflow-y-auto border-t px-4 py-3 empty:hidden">
+          <TaskApprovalCards taskId={task.id} wsId={wsId} />
+          {task.issue_id && <TranscriptRunControls key={task.id} task={task} parentId={parentId ?? task.trigger_comment_id} />}
         </div>
       </DialogContent>
     </Dialog>

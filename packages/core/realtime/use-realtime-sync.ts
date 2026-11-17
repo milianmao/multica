@@ -10,7 +10,8 @@ import {
   runWithSyncCauses,
   type SyncCauses,
 } from "../api/realtime-observer";
-import type { WSMessage } from "../types/events";
+import type { WSMessage, ChatSessionUpdatedPayload } from "../types/events";
+import { ChatSessionUpdatedPayloadSchema } from "../api/schemas";
 import type { StoreApi, UseBoundStore } from "zustand";
 import type { AuthState } from "../auth/store";
 import { createLogger } from "../logger";
@@ -361,15 +362,6 @@ export async function applyChatQuickActionsToCache(
   }
 }
 
-type ChatSessionUpdatedPayload = {
-  chat_session_id: string;
-  title?: string;
-  project_id?: string | null;
-  pinned?: boolean;
-  status?: "active" | "archived";
-  updated_at?: string;
-};
-
 /**
  * Patch the cached sessions row for a `chat:session_updated` event (rename,
  * pin/unpin, archive/unarchive from any tab/device) instead of refetching the
@@ -392,27 +384,38 @@ export function applyChatSessionUpdatedToCache(
   wsId: string,
   payload: ChatSessionUpdatedPayload,
 ): void {
+  const parsed = ChatSessionUpdatedPayloadSchema.safeParse(payload);
+  if (!parsed.success) return;
+  const event = parsed.data;
+  if (event.workspace_id && event.workspace_id !== wsId) return;
+  const patch = (session: ChatSession): ChatSession => ({
+    ...session,
+    title: event.title ?? session.title,
+    ...("project_id" in event ? { project_id: event.project_id } : {}),
+    ...("execution_config" in event ? { execution_config: event.execution_config ?? {} } : {}),
+    ...("execution_config" in event || "effective_execution_config" in event
+      ? { effective_execution_config: event.effective_execution_config } : {}),
+    ...("execution_config_supported" in event ? { execution_config_supported: event.execution_config_supported } : {}),
+    ...("execution_config_capabilities" in event ? { execution_config_capabilities: event.execution_config_capabilities } : {}),
+    pinned: event.pinned ?? session.pinned,
+    status: event.status ?? session.status,
+    updated_at: event.updated_at ?? session.updated_at,
+    ...(event.status === "archived" ? { unread_count: 0, has_unread: false } : {}),
+  });
+  qc.setQueryData<ChatSession>(chatKeys.session(wsId, event.chat_session_id), (old) =>
+    old ? patch(old) : old,
+  );
   qc.setQueryData<ChatSession[]>(chatKeys.sessions(wsId), (old) => {
     if (!old) return old;
-    const next = old.map((s) =>
-      s.id === payload.chat_session_id
-        ? {
-            ...s,
-            title: payload.title ?? s.title,
-            ...("project_id" in payload ? { project_id: payload.project_id } : {}),
-            pinned: payload.pinned ?? s.pinned,
-            status: payload.status ?? s.status,
-            updated_at: payload.updated_at ?? s.updated_at,
-            ...(payload.status === "archived"
-              ? { unread_count: 0, has_unread: false }
-              : {}),
-          }
-        : s,
-    );
-    return payload.pinned === undefined && payload.status === undefined
-      ? next
-      : sortChatSessions(next);
+    const next = old.map((session) => session.id === event.chat_session_id ? patch(session) : session);
+    return event.pinned === undefined && event.status === undefined ? next : sortChatSessions(next);
   });
+  // Raw-only events cannot resolve inherited values. Refetch the server
+  // projection rather than displaying the previous effective model forever.
+  if ("execution_config" in event && !("effective_execution_config" in event)) {
+    void qc.invalidateQueries({ queryKey: chatKeys.session(wsId, event.chat_session_id) });
+    void qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+  }
 }
 
 function removeChatMessageFromPageCache(
@@ -589,6 +592,10 @@ export async function handleInboxNew(
   // A new item in ANY workspace can light the workspace-switcher dot, so
   // refresh the cross-workspace summary regardless of the active workspace.
   void onInboxSummaryInvalidate(qc);
+  // Moving to in_progress is routine progress (an agent picking the issue
+  // up), the same exception the server's delegated-handoff rule makes. The
+  // row still lands in the inbox; it just doesn't interrupt with a banner.
+  if (item.type === "status_changed" && item.details?.to === "in_progress") return;
   // Fire a native OS notification only when the app isn't focused. When
   // the user is already looking at Multica, the inbox sidebar's unread
   // styling is enough — no need to interrupt with a banner. `desktopAPI`
@@ -904,6 +911,10 @@ export function useRealtimeSync(
         const wsId = getCurrentWsId();
         if (wsId) {
           qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
+          // Chat projections inherit agent settings; only the server resolves
+          // effective model, effort, and tier after an agent configuration change.
+          qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+          qc.invalidateQueries({ queryKey: [...chatKeys.all(wsId), "session"] });
           // Squad members status is derived per agent, so any agent
           // change (status flip, archive, runtime swap) needs to refresh the
           // per-squad members-status cache without refetching the static squad
@@ -1158,6 +1169,19 @@ export function useRealtimeSync(
       }, 1_000));
     };
 
+    // A project's last_activity_at is the newest activity among its issues,
+    // so every event that advances an issue's activity can move it. Refresh
+    // at most once a second, one second after the first event: agents comment
+    // and edit in bursts, and the list recomputes stats for every project.
+    const projectActivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const scheduleProjectActivityRefresh = (wsId: string) => {
+      if (projectActivityTimers.has(wsId)) return;
+      projectActivityTimers.set(wsId, setTimeout(() => {
+        projectActivityTimers.delete(wsId);
+        qc.invalidateQueries({ queryKey: projectKeys.list(wsId) });
+      }, 1_000));
+    };
+
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     const timerCauses = new Map<string, SyncCauses>();
     const debouncedRefresh = (prefix: string, fn: () => void) => {
@@ -1254,6 +1278,11 @@ export function useRealtimeSync(
           task.issue_id === issue.id ? { ...task, issue_title: issue.title } : task,
         ));
       }
+      // Whose issue it is decides each subscriber's delivery tier, and a
+      // reassignment can change that without any subscriber event (MUL-9360).
+      if (payload.assignee_changed) {
+        qc.invalidateQueries({ queryKey: issueKeys.subscribers(issue.id) });
+      }
       const wsId = getCurrentWsId();
       if (wsId) {
         onIssueUpdated(qc, wsId, issue, {
@@ -1296,7 +1325,10 @@ export function useRealtimeSync(
       const { issue_id, labels, issue_revision } = p as IssueLabelsChangedPayload;
       if (!issue_id) return;
       const wsId = getCurrentWsId();
-      if (wsId) onIssueLabelsChanged(qc, wsId, issue_id, labels ?? [], issue_revision);
+      if (wsId) {
+        onIssueLabelsChanged(qc, wsId, issue_id, labels ?? [], issue_revision);
+        scheduleProjectActivityRefresh(wsId);
+      }
     });
 
     // Personal; may belong to a workspace other than the open one.
@@ -1317,7 +1349,10 @@ export function useRealtimeSync(
       const { issue_id, metadata, issue_revision } = p as IssueMetadataChangedPayload;
       if (!issue_id) return;
       const wsId = getCurrentWsId();
-      if (wsId) onIssueMetadataChanged(qc, wsId, issue_id, metadata ?? {}, issue_revision);
+      if (wsId) {
+        onIssueMetadataChanged(qc, wsId, issue_id, metadata ?? {}, issue_revision);
+        scheduleProjectActivityRefresh(wsId);
+      }
     });
 
     const unsubIssuePropertiesChanged = ws.on("issue_properties:changed", (p) => {
@@ -1326,6 +1361,7 @@ export function useRealtimeSync(
       const wsId = getCurrentWsId();
       if (wsId) {
         onIssuePropertiesChanged(qc, wsId, issue_id, properties ?? {}, issue_revision);
+        scheduleProjectActivityRefresh(wsId);
         // The catalog embeds per-definition usage counts; every value
         // set/unset shifts them. The list is tiny, so a refetch beats
         // trying to patch counts client-side.
@@ -1396,6 +1432,7 @@ export function useRealtimeSync(
       if (wsId) {
         invalidateUpdatedAtSortedIssueLists(qc, wsId);
         invalidateLastActivitySortedIssueLists(qc, wsId);
+        scheduleProjectActivityRefresh(wsId);
         // A comment carries only the aggregate owner revision, not a full
         // Issue snapshot. Mark stale projections for an authoritative fetch
         // without making a later full snapshot look older than the cache.
@@ -1415,6 +1452,7 @@ export function useRealtimeSync(
       const wsId = getCurrentWsId();
       if (wsId) {
         invalidateLastActivitySortedIssueLists(qc, wsId);
+        scheduleProjectActivityRefresh(wsId);
         if (issue_revision) {
           onIssueAuxiliaryRevision(qc, wsId, comment.issue_id, issue_revision);
         } else {
@@ -1431,6 +1469,7 @@ export function useRealtimeSync(
       const wsId = getCurrentWsId();
       if (wsId) {
         invalidateLastActivitySortedIssueLists(qc, wsId);
+        scheduleProjectActivityRefresh(wsId);
         if (issue_revision) {
           onIssueAuxiliaryRevision(qc, wsId, issue_id, issue_revision);
         } else {
@@ -1984,6 +2023,7 @@ export function useRealtimeSync(
       chatWsLogger.info("chat:session_created (global)", payload);
       if (payload.workspace_id !== getCurrentWsId()) return;
       invalidateSessionLists();
+      qc.invalidateQueries({ queryKey: chatKeys.session(payload.workspace_id, payload.chat_session_id) });
     });
 
     // chat:session_updated fires after the creator renames, pins, or archives
@@ -2080,6 +2120,8 @@ export function useRealtimeSync(
       disposed = true;
       workingAgentTimers.forEach(clearTimeout);
       workingAgentTimers.clear();
+      projectActivityTimers.forEach(clearTimeout);
+      projectActivityTimers.clear();
       workingAgentDirty.clear();
       workingAgentCauses.clear();
     };

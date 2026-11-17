@@ -24,6 +24,13 @@ type Backend interface {
 
 // ExecOptions configures a single execution.
 type ExecOptions struct {
+	// ApprovalPolicy is "on-request" or "full-access"; empty preserves the
+	// existing unattended behavior. Only Codex consumes this policy.
+	ApprovalPolicy  string
+	ApprovalHandler ApprovalHandler
+	// OnApprovalPending receives +1 before registration and -1 after a native
+	// reply or cancellation so the caller can pause its idle watchdog.
+	OnApprovalPending func(delta int)
 	// EnableTaskSupplement installs provider hooks only for runs whose daemon/server
 	// capability handshake enabled additional messages.
 	EnableTaskSupplement bool
@@ -132,9 +139,13 @@ type ExecOptions struct {
 	ThinkingLevel string
 	// ServiceTier is a runtime-native Codex execution tier (for example
 	// "priority", displayed as Fast). "default" explicitly selects standard
-	// routing; empty means inherit local Codex config.
-	// Other providers ignore this field.
+	// routing; legacy empty values inherit local Codex config. An empty complete
+	// execution snapshot clears persisted routing instead. Other providers ignore it.
 	ServiceTier string
+	// ExecutionConfigPresent distinguishes a complete send-time snapshot from
+	// legacy optional overrides. Codex must not restore empty snapshot choices
+	// from a resumed thread; false preserves the historical inheritance path.
+	ExecutionConfigPresent bool
 	// OpenclawMode chooses between local (embedded) and gateway routing for
 	// the openclaw backend. "" or "local" keeps the historical behaviour —
 	// the daemon spawns `openclaw agent --local …` and the agent loop runs

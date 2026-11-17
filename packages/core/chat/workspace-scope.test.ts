@@ -27,6 +27,7 @@ const session = (workspaceId: string): ChatSession => ({
   title: `Chat in ${workspaceId}`,
   status: "active",
   has_unread: false,
+  execution_config_supported: false,
   created_at: "2026-11-05T00:00:00Z",
   updated_at: "2026-11-05T00:00:00Z",
 });

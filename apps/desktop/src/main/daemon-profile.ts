@@ -5,7 +5,7 @@ import { join } from "path";
 export const DEFAULT_HEALTH_PORT = 19514;
 
 /**
- * Desktop owns only `~/.multica/profiles/desktop-<host>/`. The default profile
+ * Desktop owns only `~/.multica/profiles/<prefix>-<host>/`. The default profile
  * at `~/.multica/` — config, daemon log, and health port 19514 — belongs to the
  * user's terminal CLI and must never be read, written, probed, or passed to the
  * bundled CLI.
@@ -22,16 +22,18 @@ export function assertResolvedProfile(profile: string): void {
   }
 }
 
-// Desktop owns a dedicated CLI profile named after the target API host, so it
-// never reads or writes the user's hand-configured profiles. Profile dir:
-//   ~/.multica/profiles/desktop-<host>/
-export function deriveProfileName(targetUrl: string): string {
+/**
+ * Each Desktop build owns a host-specific namespace. The default prefix keeps
+ * existing Desktop profiles; a distinct prefix lets local builds coexist on
+ * the same backend without sharing daemon state.
+ */
+export function deriveProfileName(targetUrl: string, prefix = "desktop"): string {
   try {
     const url = new URL(targetUrl);
     const host = url.host.replace(/:/g, "-").toLowerCase();
-    return `desktop-${host}`;
+    return `${prefix}-${host}`;
   } catch {
-    return "desktop";
+    return prefix;
   }
 }
 

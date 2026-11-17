@@ -20,6 +20,10 @@ export interface TimelineItem {
   created_at?: string;
 }
 
+type ProseFragment = Pick<TimelineItem, "seq" | "content" | "created_at">;
+// Retain immutable source positions without exposing unredacted fragments on rendered items.
+const proseFragments = new WeakMap<TimelineItem, readonly ProseFragment[]>();
+
 function canMergeStreamingText(prev: TimelineItem, next: TimelineItem): boolean {
   return (prev.type === "thinking" || prev.type === "text") && prev.type === next.type;
 }
@@ -32,11 +36,13 @@ export function coalesceTimelineItems(items: TimelineItem[]): TimelineItem[] {
   for (const item of sorted) {
     const prev = out[out.length - 1];
     if (prev && canMergeStreamingText(prev, item)) {
-      out[out.length - 1] = {
+      const merged = {
         ...prev,
         content: `${prev.content ?? ""}${item.content ?? ""}`,
         created_at: item.created_at ?? prev.created_at,
       };
+      proseFragments.set(merged, [...(proseFragments.get(prev) ?? [prev]), ...(proseFragments.get(item) ?? [item])]);
+      out[out.length - 1] = merged;
       continue;
     }
     out.push(item);
@@ -47,6 +53,50 @@ export function coalesceTimelineItems(items: TimelineItem[]): TimelineItem[] {
 
 export function appendTimelineItem(items: TimelineItem[], item: TimelineItem): TimelineItem[] {
   return coalesceTimelineItems([...items, item]);
+}
+
+/**
+ * Split only prose runs crossed by published timestamps, keeping their original seqs.
+ * Cuts are projected onto the fully redacted body: redacting each side separately
+ * could expose a credential that the daemon streamed across a guidance boundary.
+ */
+export function splitTimelineItemsAt(items: TimelineItem[], dates: readonly (string | undefined)[]): TimelineItem[] {
+  const boundaries = dates.map((date) => Date.parse(date ?? "")).filter(Number.isFinite).sort((a, b) => a - b);
+  if (boundaries.length === 0) return items;
+  return items.flatMap((item) => {
+    const fragments = proseFragments.get(item);
+    if (!fragments || fragments.length < 2) return [item];
+    const groups: ProseFragment[][] = [];
+    let group: ProseFragment[] = [];
+    let bucket = 0;
+    for (const fragment of fragments) {
+      const stamp = Date.parse(fragment.created_at ?? "");
+      const next = Number.isFinite(stamp) ? Math.max(bucket, boundaries.filter((at) => at < stamp).length) : bucket;
+      if (next !== bucket && group.length > 0) { groups.push(group); group = []; }
+      group.push(fragment);
+      bucket = next;
+    }
+    groups.push(group);
+    if (groups.length === 1) return [item];
+    const body = redactSecrets(fragments.map((fragment) => fragment.content ?? "").join(""));
+    let prefix = "";
+    let from = 0;
+    return groups.map((members, index) => {
+      prefix += members.map((fragment) => fragment.content ?? "").join("");
+      let end = body.length;
+      if (index < groups.length - 1) {
+        const safePrefix = redactSecrets(prefix);
+        let common = 0;
+        while (common < safePrefix.length && common < body.length && safePrefix[common] === body[common]) common++;
+        end = Math.max(from, common);
+      }
+      const part: TimelineItem = { ...item, seq: members[0]!.seq, content: body.slice(from, end),
+        created_at: members.reduce<string | undefined>((last, fragment) => fragment.created_at ?? last, undefined) };
+      from = end;
+      proseFragments.set(part, members);
+      return part;
+    });
+  });
 }
 
 function redactTimelineItems(items: TimelineItem[]): TimelineItem[] {
@@ -123,10 +173,12 @@ function mergeRun(run: readonly TaskMessagePayload[]): TimelineItem {
   };
 }
 
+/** Retains stable redacted prose identity and original fragments for guidance insertion. */
 function buildRun(run: readonly TaskMessagePayload[]): TimelineItem {
   const cached = builtRuns.get(run[0]!);
   if (cached && sameMembers(cached.members, run)) return cached.item;
   const item = redactTimelineItems([mergeRun(run)])[0]!;
+  if (run.length > 1) proseFragments.set(item, run);
   builtRuns.set(run[0]!, { members: [...run], item });
   return item;
 }

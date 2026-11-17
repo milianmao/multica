@@ -727,6 +727,15 @@
     "failed_indicator": "失敗"
   },
   "transcript": {
+    "conversation": "会話",
+    "execution_log": "実行ログ",
+    "final_reply": "最終返信",
+    "guidance_label": "この実行に指示を追加",
+    "guidance_send": "指示を送信",
+    "guidance_failed": "指示を送信できませんでした。入力した内容は保持されています。",
+    "guidance_shared": "タスクのコメントスレッドに表示されます。",
+    "guidance_unavailable": "この実行には指示を追加できません。",
+    "guidance_ended": "この実行は終了しました。",
     "dialog_title": "エージェント実行トランスクリプト",
     "status_running": "実行中",
     "status_completed": "完了",

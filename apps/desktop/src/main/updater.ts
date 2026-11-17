@@ -69,6 +69,7 @@ export interface UpdaterDaemonGate {
 }
 
 export interface SetupAutoUpdaterOptions {
+  disabled?: boolean;
   daemonGate?: UpdaterDaemonGate;
   platform?: NodeJS.Platform;
 }
@@ -148,10 +149,30 @@ function checkForUpdatesOnce(): Promise<unknown> {
   return p;
 }
 
+/**
+ * Registers updater IPC for every build, but Local redistributions must never
+ * download or install a production release over their isolated application.
+ */
 export function setupAutoUpdater(
   getMainWindows: () => readonly BrowserWindow[],
   options: SetupAutoUpdaterOptions = {},
 ): void {
+  if (options.disabled) {
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    const disabledPreferences = async (): Promise<UpdaterPreferences> => ({ automaticUpdates: false });
+    ipcMain.handle("updater:get-preferences", disabledPreferences);
+    ipcMain.handle("updater:set-automatic-updates", disabledPreferences);
+    ipcMain.handle("updater:check", async (): Promise<ManualUpdateCheckResult> => ({
+      ok: true,
+      currentVersion: app.getVersion(),
+      latestVersion: app.getVersion(),
+      available: false,
+    }));
+    ipcMain.handle("updater:download", async () => {});
+    ipcMain.handle("updater:install", async () => {});
+    return;
+  }
   // Every main window mounts the update banner, so each one hears progress.
   const broadcast = (channel: RendererChannel, payload: unknown) => {
     for (const win of getMainWindows()) sendToLiveRenderer(win, channel, payload);

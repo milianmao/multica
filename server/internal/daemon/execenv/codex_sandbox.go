@@ -131,8 +131,8 @@ func codexSandboxPolicyFor(goos, detectedVersion string) codexSandboxPolicy {
 	}
 }
 
-// windowsSandboxConfig is the tri-state of a native Codex Windows sandbox
-// selection. It is three-valued (not a bool) so an undecidable config fails
+// windowsSandboxConfig records explicit native selection, automatic preference,
+// absence, or uncertainty. An undecidable config fails
 // closed — the daemon never loosens to danger-full-access when it cannot
 // confirm the user's intent. See MUL-4957.
 type windowsSandboxConfig int
@@ -141,21 +141,25 @@ const (
 	// windowsSandboxAbsent: confidently no native sandbox is selected anywhere,
 	// so the danger-full-access compatibility fallback is safe to apply.
 	windowsSandboxAbsent windowsSandboxConfig = iota
-	// windowsSandboxNative: a valid windows.sandbox = "unelevated"|"elevated"
-	// is selected, so keep workspace-write and let Codex enforce isolation.
+	// windowsSandboxNative: an explicit native implementation is selected.
+	// The backend must still verify runtime readiness on-request.
 	windowsSandboxNative
 	// windowsSandboxUndecidable: the config could not be read/parsed, or holds
 	// a windows.sandbox value Codex does not accept. The daemon cannot tell
 	// whether the user asked for isolation, so it must NOT loosen — fail closed.
 	windowsSandboxUndecidable
+	// windowsSandboxPreferred records MXC intent without changing the inherited
+	// policy's historical fallback. On-request accepts it only with native proof.
+	windowsSandboxPreferred
 )
 
 // codexSandboxPolicyForConfig returns the platform default from
 // codexSandboxPolicyFor for linux/darwin. On Windows it applies the resolved
 // native-sandbox state (see resolveWindowsSandboxState): a user who opted into
 // windows.sandbox keeps workspace-write, an undecidable config fails closed to
-// workspace-write, and only a confidently absent sandbox gets the
-// danger-full-access compatibility fallback. See MUL-4957.
+// workspace-write. Absent selection or automatic preference alone retains the
+// inherited danger-full-access compatibility fallback. Strict approval policies
+// resolve separately and require affirmative native readiness.
 //
 // This is intentionally the branch point for the eventual native-sandbox
 // rollout: flipping the Windows default later means writing windows.sandbox
@@ -172,8 +176,8 @@ func codexSandboxPolicyForConfig(goos, detectedVersion string, winState windowsS
 
 // codexSandboxPolicyForWindows maps a resolved native-sandbox state to a
 // policy. Native and Undecidable both keep workspace-write (Undecidable is the
-// fail-closed case — it never loosens on doubt); only a confidently absent
-// native sandbox gets the danger-full-access compatibility fallback.
+// fail-closed case — it never loosens on doubt). Absent selection and automatic
+// preference alone retain the inherited danger-full-access fallback.
 func codexSandboxPolicyForWindows(state windowsSandboxConfig) codexSandboxPolicy {
 	switch state {
 	case windowsSandboxNative:
@@ -188,7 +192,7 @@ func codexSandboxPolicyForWindows(state windowsSandboxConfig) codexSandboxPolicy
 			NetworkAccess: true,
 			Reason:        "codex on windows: windows.sandbox config undecidable (unreadable/unparseable/invalid); failing closed to workspace-write rather than loosening (MUL-4957)",
 		}
-	default: // windowsSandboxAbsent
+	default: // windowsSandboxAbsent or inherited automatic preference
 		return codexSandboxPolicy{
 			Mode:   "danger-full-access",
 			Reason: "codex on windows: compatibility fallback; no native windows.sandbox configured (MUL-4957)",
@@ -196,22 +200,55 @@ func codexSandboxPolicyForWindows(state windowsSandboxConfig) codexSandboxPolicy
 	}
 }
 
+// codexSandboxPolicyForApproval keeps legacy platform fallbacks separate from
+// explicit intent. Unsupported strict enforcement fails instead of loosening it.
+func codexSandboxPolicyForApproval(goos, version string, winState windowsSandboxConfig, approvalPolicy string) (codexSandboxPolicy, error) {
+	switch approvalPolicy {
+	case "":
+		return codexSandboxPolicyForConfig(goos, version, winState), nil
+	case "full-access":
+		return codexSandboxPolicy{Mode: "danger-full-access", Reason: "explicit full-access execution policy"}, nil
+	case "on-request":
+		switch resolveGOOS(goos) {
+		case "windows":
+			if winState != windowsSandboxNative && winState != windowsSandboxPreferred {
+				return codexSandboxPolicy{}, fmt.Errorf("codex on-request requires a configured native Windows sandbox; absent or undecidable configuration cannot fall back to full-access")
+			}
+		case "darwin":
+			if !codexDarwinNetworkAccessFixed(version) {
+				return codexSandboxPolicy{}, fmt.Errorf("codex on-request cannot enforce workspace-write with Multica networking on this macOS version; full-access fallback is forbidden")
+			}
+		case "linux":
+		default:
+			return codexSandboxPolicy{}, fmt.Errorf("codex on-request sandbox is unsupported on %q", resolveGOOS(goos))
+		}
+		return codexSandboxPolicy{Mode: "workspace-write", NetworkAccess: true, Reason: "explicit on-request execution policy"}, nil
+	default:
+		return codexSandboxPolicy{}, fmt.Errorf("unsupported codex approval policy %q", approvalPolicy)
+	}
+}
+
 // windowsSandboxFromConfig classifies the windows.sandbox selection in a
-// config.toml body. Codex accepts only the exact-lowercase variants
-// "unelevated"/"elevated" and refuses to load a config with any other value, so
-// anything else present is treated as undecidable (fail closed) rather than a
-// safe "absent". Unparseable TOML is likewise undecidable — Codex would reject
-// the same file. An absent windows.sandbox key is a genuine "absent".
+// config.toml body. Native implementations are exact-lowercase selections;
+// prefer_mxc requests automatic native selection but does not prove readiness.
+// Unsupported values or unparseable TOML remain undecidable, never full-access.
 func windowsSandboxFromConfig(config string) windowsSandboxConfig {
 	var probe struct {
 		Windows struct {
 			Sandbox string `toml:"sandbox"`
 		} `toml:"windows"`
+		Features struct {
+			PreferMXC bool `toml:"prefer_mxc"`
+		} `toml:"features"`
 	}
 	if err := toml.Unmarshal([]byte(config), &probe); err != nil {
 		return windowsSandboxUndecidable
 	}
-	return classifyWindowsSandboxValue(probe.Windows.Sandbox)
+	state := classifyWindowsSandboxValue(probe.Windows.Sandbox)
+	if state == windowsSandboxAbsent && probe.Features.PreferMXC {
+		return windowsSandboxPreferred
+	}
+	return state
 }
 
 // codexConfigOverrideValueRe matches the value token of a Codex `-c` /
@@ -272,7 +309,7 @@ func classifyWindowsSandboxValue(raw string) windowsSandboxConfig {
 	switch v {
 	case "":
 		return windowsSandboxAbsent
-	case "unelevated", "elevated":
+	case "unelevated", "elevated", "mxc":
 		return windowsSandboxNative
 	default:
 		return windowsSandboxUndecidable
@@ -281,7 +318,8 @@ func classifyWindowsSandboxValue(raw string) windowsSandboxConfig {
 
 // resolveWindowsSandbox folds per-layer states into one. Undecidable wins over
 // everything (any broken/ambiguous layer means fail closed), then Native over
-// Absent (an opt-in in any layer keeps isolation).
+// Preferred over Absent. Automatic preference survives until the approval policy
+// decides whether to require native readiness or retain the legacy fallback.
 func resolveWindowsSandbox(states ...windowsSandboxConfig) windowsSandboxConfig {
 	result := windowsSandboxAbsent
 	for _, s := range states {
@@ -290,6 +328,8 @@ func resolveWindowsSandbox(states ...windowsSandboxConfig) windowsSandboxConfig 
 		}
 		if s == windowsSandboxNative {
 			result = windowsSandboxNative
+		} else if s == windowsSandboxPreferred && result == windowsSandboxAbsent {
+			result = windowsSandboxPreferred
 		}
 	}
 	return result

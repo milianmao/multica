@@ -1,0 +1,20 @@
+extends: ./electron-builder.yml
+appId: ai.multica.desktop.local
+productName: Multica Local
+extraMetadata:
+  name: multica-local
+  productName: Multica Local
+directories:
+  output: dist/local
+protocols:
+  - name: Multica Local
+    schemes:
+      - multica-local
+win:
+  target:
+    - nsis
+    - zip
+  artifactName: multica-local-${version}-windows-${arch}.${ext}
+nsis:
+  shortcutName: Multica Local
+publish: null
