@@ -1433,8 +1433,13 @@ func TestCodexRawItemMCPToolCall(t *testing.T) {
 		t.Fatalf("expected MCP arguments, got %#v", begin.Input["arguments"])
 	}
 	credentials, ok := arguments["credentials"].(map[string]any)
-	if !ok || credentials["api_key"] != "[REDACTED API KEY]" {
+	if !ok || credentials["api_key"] != "[REDACTED CREDENTIAL]" {
 		t.Fatalf("expected nested MCP secret to be redacted, got %#v", arguments["credentials"])
+	}
+	// The mapping still names the field so a reader sees which credential went out
+	// without seeing its value — the value itself must be absent, not merely relabelled.
+	if seen := fmt.Sprintf("%#v", arguments["credentials"]); strings.Contains(seen, "sk-12345678901234567890") {
+		t.Fatalf("MCP secret leaked through the tool input: %s", seen)
 	}
 
 	end := messages[1]

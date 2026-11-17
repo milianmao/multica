@@ -1651,7 +1651,10 @@ func TestScanKimiMainTurnFailureSanitizesWireDiagnostic(t *testing.T) {
 	if strings.Contains(detail, fakeSecret) {
 		t.Errorf("secret leaked through the wire diagnostic: %q", detail)
 	}
-	if !strings.Contains(detail, `api_key":"[REDACTED]"`) {
+	// The credential-field rule masks the whole `api_key:` pair, so the value is
+	// gone and only the placeholder remains. Assert the placeholder rather than the
+	// surrounding punctuation: the injected text is composed by the scanner.
+	if !strings.Contains(detail, "[REDACTED CREDENTIAL]") {
 		t.Errorf("expected the JSON secret field redacted, got %q", detail)
 	}
 }
