@@ -27,7 +27,13 @@ func TestChatApprovalConfigOwnerBoundTaskToken(t *testing.T) {
 	})
 	taskID := fx.Task(t, agentID, testutil.Cols{
 		"status": "running", "runtime_id": runtimeID, "chat_session_id": sessionID,
-		"originator_user_id": testUserID,
+		// The attribution invariant (migration 197) is `originator_user_id IS NULL
+		// OR accountable_user_id = originator_user_id`, so stamping only the
+		// originator makes the INSERT itself fail. Both columns describe the same
+		// human here; the assertion under test is about the machine token, not
+		// attribution.
+		"originator_user_id":  testUserID,
+		"accountable_user_id": testUserID,
 	})
 	token := "mat_chat_approval_" + uuid.NewString()
 	fx.Insert(t, "task_token", testutil.Cols{

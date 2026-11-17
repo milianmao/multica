@@ -24,7 +24,9 @@ func newTaskApprovalFixture(t *testing.T) *taskApprovalFixture {
 	}
 	f := &taskApprovalFixture{daemonID: "native-approval-" + uuid.NewString()}
 	f.runtimeID = dbfx.Runtime(t, "Native approval runtime", testutil.Cols{"provider": "codex", "daemon_id": f.daemonID})
-	f.agentID = dbfx.Agent(t, "Native approval agent", f.runtimeID)
+	// Agent names are unique per workspace (migration 046), and one test builds two
+	// fixtures in the same workspace, so each one needs its own name.
+	f.agentID = dbfx.Agent(t, "Native approval agent "+uuid.NewString(), f.runtimeID)
 	f.issueID = dbfx.Issue(t, "Native approval issue")
 	claim := time.Now().UTC().Truncate(time.Microsecond)
 	f.taskID = dbfx.Task(t, f.agentID, testutil.Cols{
